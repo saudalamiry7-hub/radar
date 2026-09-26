@@ -141,7 +141,7 @@ const CFG = {
   D: { stLen: 10, stMult: 3, atrLen: 14, swing: 12, minTarget: 5, minRR: 2, maxStop: 12, pivot: 3, look: 180 },
   regime: { attack: 55, defense: 35 },
   journal: { horizonDays: 10, maxEval: 40, sample: 40 },
-  near: { max: 3, minTarget: 3, maxStop: 15, minRR: 1.3 },
+  near: { max: 3 },
 };
 const W = { ping: 1, ticker: 80, book: 4, klines: 2 };
 const NEVER = new Set(['BTC','USDC','FDUSD','TUSD','USDP','DAI','BUSD','EUR','AEUR','EURI','USD1','PYUSD','XUSD','RLUSD','USDE','USDS','BFUSD','UST','USTC','PAX','GBP','TRY','BRL','ARS','WBTC','WBETH','BETH','BNSOL','PAXG','XAUT']);
@@ -311,20 +311,25 @@ function grade(r, mode) {
   return { tier, raw, capped: tier < raw };
 }
 
-/* قيد المراقبة: قريبة من الشروط لكنها لم تجتزها. الاتجاه والسيولة وعدم الضخ تبقى إلزامية. */
+/* قيد المراقبة: أعلى 3 تقييمًا من العملات التي لم تجتز الشروط، بلا أي حد أدنى. */
 function nearMiss(r) {
-  const D = r.D, N = CFG.near;
-  if (!D.stGreen || r.B.suspect) return null;
-  if (r.low && !(r.B.pass && r.B.surge)) return null;
-  if (D.targetPct < N.minTarget || D.stopPct > N.maxStop || D.rr < N.minRR) return null;
+  const D = r.D;
   const n = (r.A.pass ? 1 : 0) + (r.B.pass ? 1 : 0) + (r.C.pass ? 1 : 0);
-  if (n === 0) return null;
+  let score = n + (D.stGreen ? 1 : 0)
+    + Math.min(D.targetPct / CFG.D.minTarget, 1)
+    + Math.min(D.rr / CFG.D.minRR, 1)
+    + (D.stopPct <= CFG.D.maxStop ? 1 : CFG.D.maxStop / D.stopPct);
+  if (r.B.suspect) score -= 1;
+  const weak = r.low && !(r.B.pass && r.B.surge);
+  if (weak) score -= 1;
   const gaps = [];
+  if (!D.stGreen) gaps.push('Supertrend 4H سلبي');
   if (D.targetPct < CFG.D.minTarget) gaps.push((D.sky ? 'الهدف المتوقع ' : 'المقاومة على بعد ') + D.targetPct.toFixed(1) + '%');
   if (D.stopPct > CFG.D.maxStop) gaps.push('الوقف ' + D.stopPct.toFixed(1) + '%');
   if (D.rr < CFG.D.minRR) gaps.push('العائد/المخاطرة ' + D.rr.toFixed(1));
-  if (!gaps.length) return null;
-  return { tier: 0, n, gaps };
+  if (n === 0) gaps.push('لا إشارات داعمة');
+  if (weak) gaps.push('سيولة ضعيفة');
+  return { tier: 0, n, score, gaps };
 }
 
 function regimeOf(btcD, breadth) {
@@ -475,11 +480,11 @@ async function scan() {
       if (c4.length < 60 || c1.length < 60) { ex('بيانات غير كافية'); return; }
       const r = analyze(s.u, s.d1, c4, c1, btcD);
       const g = grade(r, regime.mode);
-      if (!g.tier) { ex(g.reason); const m = nearMiss(r); if (m) near.push(Object.assign(r, m)); return; }
+      if (!g.tier) { ex(g.reason); near.push(Object.assign(r, nearMiss(r))); return; }
       picks.push(Object.assign(r, g));
     });
     picks.sort((x, y) => y.tier - x.tier || y.D.rr - x.D.rr);
-    near.sort((x, y) => y.n - x.n || y.D.rr - x.D.rr);
+    near.sort((x, y) => y.score - x.score || y.D.rr - x.D.rr);
     near.splice(CFG.near.max);
 
     setProgress('تحديث السجل', 0.9);
@@ -646,7 +651,7 @@ function picksHTML() {
     <p><b>C</b> قوة أمام BTC: تتفوق على البيتكوين خلال 3 و7 أيام.</p>
     <p><b>D</b> صفقة صالحة: Supertrend 4H إيجابي، هدف 5% أو أكثر قبل المقاومة، وعائد/مخاطرة 2 أو أكثر. شرط إلزامي لكل ما يظهر.</p>
     <p>ممتاز = D مع A وB وC. جيد جدًا = D مع اثنتين. جيد = D مع واحدة.</p>
-    <p>قيد المراقبة = أفضل 3 لم تجتز D، بشرط Supertrend إيجابي وإشارة واحدة على الأقل، وهدف ≥ 3% ووقف ≤ 15% وعائد/مخاطرة ≥ 1.3. تُسجَّل في السجل كفئة مستقلة.</p></details>`;
+    <p>قيد المراقبة = أعلى 3 تقييمًا من العملات التي لم تجتز الشروط، مع ما ينقص كل واحدة. ليست جاهزة للدخول. تُسجَّل في السجل كفئة مستقلة.</p></details>`;
   return html;
 }
 
@@ -710,7 +715,7 @@ function settingsHTML() {
       <p>B: الحجم ≥ ×${CFG.B.vol}، عدد الصفقات يتبعه بنسبة ${CFG.B.follow * 100}%، حجم الصفقة ≤ ×${CFG.B.size}. اشتباه ضخ فوق ×${CFG.B.suspect}.</p>
       <p>D: هدف ≥ ${CFG.D.minTarget}%، عائد/مخاطرة ≥ ${CFG.D.minRR}، وقف ≤ ${CFG.D.maxStop}%.</p>
       <p>الفلاتر: حجم ≥ $5M (أو $1.5M مع دخول حجم صحي ×${CFG.B.surge})، صعود يومي ≤ ${CFG.chaseMax}%، فارق سعري ≤ ${CFG.spreadMax}%، عمر ≥ ${CFG.minDays} يومًا.</p>
-      <p>قيد المراقبة: أفضل ${CFG.near.max}، هدف ≥ ${CFG.near.minTarget}%، وقف ≤ ${CFG.near.maxStop}%، عائد/مخاطرة ≥ ${CFG.near.minRR}.</p>
+      <p>قيد المراقبة: أعلى ${CFG.near.max} تقييمًا بلا حد أدنى.</p>
       <p>هذه قيم ابتدائية. تُعدَّل بعد تحليل السجل فقط.</p></details>`;
 }
 
