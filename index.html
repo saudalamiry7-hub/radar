@@ -21,7 +21,7 @@
 *{box-sizing:border-box;margin:0;padding:0}
 html,body{background:var(--sea);color:var(--sand);font-family:'IBM Plex Sans Arabic',system-ui,-apple-system,sans-serif;font-size:16px;line-height:1.55;-webkit-text-size-adjust:100%}
 body{padding-bottom:calc(72px + env(safe-area-inset-bottom))}
-button,input,textarea{font:inherit;color:inherit}
+button,input,textarea,select{font:inherit;color:inherit}
 :focus-visible{outline:2px solid var(--brass);outline-offset:2px}
 .wrap{max-width:560px;margin:0 auto;padding:calc(12px + env(safe-area-inset-top)) 16px 24px}
 .num{direction:ltr;unicode-bidi:isolate;font-variant-numeric:tabular-nums}
@@ -102,12 +102,17 @@ td{padding:8px 4px;border-bottom:1px solid var(--line)}
 .meter i{display:block;height:100%;background:var(--steel)}
 .jrow{display:flex;justify-content:space-between;gap:8px;padding:8px 0;border-bottom:1px solid var(--line);font-size:13.5px}
 .win{color:var(--sage)} .loss{color:var(--coral)} .exp{color:var(--mist)}
+.seg{display:flex;gap:6px;flex-wrap:wrap;margin:6px 0 8px}
+.seg .btn{margin:0;padding:6px 12px;font-size:13px}
+.seg .btn.on{background:var(--sand);color:var(--deep);border-color:var(--sand);font-weight:600}
 
 /* Settings */
 label{display:block;font-size:14px;margin:18px 0 6px}
-textarea,input[type=text]{width:100%;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:10px 12px;font-size:14px;direction:ltr}
+textarea,input[type=text],select{width:100%;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:10px 12px;font-size:14px}
+textarea,input[type=text]{direction:ltr}
 textarea{min-height:96px}
 .btn{display:inline-block;margin:10px 8px 0 0;margin-inline:0 8px;padding:10px 14px;border-radius:10px;border:1px solid var(--line);background:var(--panel);font-size:14px;cursor:pointer}
+.btn:disabled{opacity:.55;cursor:default}
 .btn.danger{color:var(--coral);border-color:rgba(236,111,92,.5)}
 .help{font-size:13px;color:var(--mist);margin-top:6px}
 pre{white-space:pre-wrap;direction:ltr;text-align:left;background:var(--deep);border-radius:10px;padding:12px;font-size:12px;margin-top:8px;overflow-x:auto}
@@ -130,7 +135,7 @@ pre{white-space:pre-wrap;direction:ltr;text-align:left;background:var(--deep);bo
 <script>
 'use strict';
 
-/* ===================== الإعدادات الأساسية (قيم ابتدائية للمعايرة) ===================== */
+/* ===================== الإعدادات الأساسية ===================== */
 const CFG = {
   bases: ['https://data-api.binance.vision','https://api.binance.com','https://api1.binance.com','https://api2.binance.com','https://api3.binance.com','https://api4.binance.com'],
   conc: 6, timeoutMs: 12000, cooldownSec: 60, safeWeight: 3000,
@@ -138,9 +143,12 @@ const CFG = {
   chaseMax: 15, spreadMax: 0.15, minDays: 30,
   A: { hours: 48, ratio: 0.53, minMove: 0, maxMove: 8 },
   B: { vol: 1.3, surge: 2.0, follow: 0.8, size: 2, suspect: 3 },
+  // الاستراتيجية القديمة (v1): تبقى متاحة من الإعدادات
   D: { stLen: 10, stMult: 3, atrLen: 14, swing: 12, minTarget: 5, minRR: 2, maxStop: 12, pivot: 3, look: 180 },
+  // الاستراتيجية الجديدة (v2): وقف خارج ضجيج السوق، وهدف في مدى الحركة الفعلي
+  V2: { stopAtr: 2, maxStop: 14, reachAtr: 2, minTarget: 4, minRR: 0.6, ext: 1.8, pullAtr: 0.6, pullTTLh: 12 },
   regime: { attack: 55, defense: 35 },
-  journal: { horizonDays: 10, maxEval: 40, sample: 40 },
+  journal: { horizonDays: 7, maxEval: 40, sample: 40 },
   near: { max: 3 },
 };
 const W = { ping: 1, ticker: 80, book: 4, klines: 2 };
@@ -152,6 +160,7 @@ const MODE = {
   selective: { word: 'انتقائي', cap: 2, note: 'السوق مختلط. أعلى فئة معروضة: جيد جدًا.' },
   defense:   { word: 'دفاع',    cap: 1, note: 'السيولة تنسحب. أعلى فئة معروضة: جيد، وبحجم أصغر.' },
 };
+const PLN = { A: 'الأصلية', W: 'وقف واسع', S: 'واسع + جني جزئي', P: 'واسع + دخول عند تراجع' };
 
 /* ===================== التخزين ===================== */
 const store = {
@@ -163,14 +172,18 @@ const S = {
   tab: 'picks', running: false, progress: null, base: null, weight: 0, requests: 0,
   abort: null, error: null, open: {}, conn: null, exportText: null, msg: null,
   settings: null, last: null, journal: [], cooldownUntil: 0, haltUntil: 0,
+  vp: 'W', bf: null, bfMsg: null,
 };
 function loadState() {
-  S.settings = store.get('settings', { exclude: DEFAULT_EXCLUDE, proxy: '' });
+  S.settings = Object.assign({ exclude: DEFAULT_EXCLUDE, proxy: '', profile: 'v2', riskUsd: 10 }, store.get('settings', {}));
   S.last = store.get('last', null);
   S.journal = store.get('journal', []);
   S.cooldownUntil = store.get('cooldown', 0);
   S.haltUntil = store.get('halt', 0);
 }
+const profile = () => (S.settings && S.settings.profile === 'v1') ? 'v1' : 'v2';
+const ap = r => (profile() === 'v2' && r.V) ? r.V : r.D;
+const thr = () => profile() === 'v2' ? CFG.V2 : CFG.D;
 
 /* ===================== أدوات ===================== */
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -185,6 +198,7 @@ function fmtP(p) {
   return p.toFixed(8);
 }
 const fmtPct = (x, d = 1) => (x > 0 ? '+' : '') + x.toFixed(d) + '%';
+const fmtR = x => (x > 0 ? '+' : '') + x.toFixed(2) + 'R';
 const fmtVol = v => v >= 1e9 ? '$' + (v / 1e9).toFixed(2) + 'B' : '$' + (v / 1e6).toFixed(1) + 'M';
 function ago(t) {
   const m = Math.round((Date.now() - t) / 60000);
@@ -243,7 +257,7 @@ function resistances(ks, span) {
 
 /* ===================== الإشارات والتصنيف ===================== */
 function analyze(u, d1, h4, h1, btcD) {
-  const r = { sym: u.sym, base: u.base, last: u.last, qv: u.qv, chg: u.chg, low: u.qv < CFG.minVol };
+  const r = { sym: u.sym, base: u.base, last: u.last, qv: u.qv, chg: u.chg, spread: u.spread, low: u.qv < CFG.minVol };
 
   // A — طلب عدواني لم يتمدد بعد
   const a = h1.slice(-CFG.A.hours);
@@ -281,6 +295,7 @@ function analyze(u, d1, h4, h1, btcD) {
   const stGreen = st[st.length - 1] === 1;
   const atr = atrSeries(k4, CFG.D.atrLen)[k4.length - 1] || 0;
   const entry = u.last;
+  const atrPct = entry ? atr / entry * 100 : 0;
   const swingLow = Math.min(...k4.slice(-CFG.D.swing).map(k => k.l));
   let stop = swingLow * 0.995;
   if (entry - stop < atr) stop = entry - atr;
@@ -295,12 +310,27 @@ function analyze(u, d1, h4, h1, btcD) {
   else if (targetPct < CFG.D.minTarget) why = sky ? 'حركة ضيقة لا تكفي 5%' : 'مقاومة قبل 5%';
   else if (stopPct > CFG.D.maxStop) why = 'الوقف واسع جدًا';
   else if (rr < CFG.D.minRR) why = 'العائد/المخاطرة أقل من 2';
-  r.D = { pass: !why, why, stGreen, atr, entry, stop, stopPct, target, targetPct, rr, sky };
+  r.D = { pass: !why, why, stGreen, atr, atrPct, entry, stop, stopPct, target, targetPct, rr, sky };
+
+  // D2 — نفس الدخول، لكن الوقف خارج ضجيج 4H والهدف داخل مدى الحركة
+  const V = CFG.V2;
+  const vStop = Math.min(stop, entry - V.stopAtr * atr);
+  const vTarget = Math.min(target, entry + V.reachAtr * atr);
+  const vStopPct = (entry - vStop) / entry * 100;
+  const vTargetPct = (vTarget / entry - 1) * 100;
+  const vRR = entry > vStop ? (vTarget - entry) / (entry - vStop) : 0;
+  let vWhy = null;
+  if (!stGreen) vWhy = 'Supertrend 4H سلبي';
+  else if (vTargetPct < V.minTarget) vWhy = 'الهدف الواقعي أقل من ' + V.minTarget + '%';
+  else if (vStopPct > V.maxStop) vWhy = 'الوقف واسع جدًا';
+  else if (vRR < V.minRR) vWhy = 'العائد/المخاطرة أقل من ' + V.minRR;
+  r.V = { pass: !vWhy, why: vWhy, stGreen, atr, atrPct, entry, stop: vStop, stopPct: vStopPct, target: vTarget, targetPct: vTargetPct, rr: vRR, sky };
   return r;
 }
 
 function grade(r, mode) {
-  if (!r.D.pass) return { tier: 0, reason: r.D.why };
+  const D = ap(r);
+  if (!D.pass) return { tier: 0, reason: D.why };
   if (r.low && !(r.B.pass && r.B.surge)) return { tier: 0, reason: 'سيولة ضعيفة بلا دخول حجم صحي' };
   const n = (r.A.pass ? 1 : 0) + (r.B.pass ? 1 : 0) + (r.C.pass ? 1 : 0);
   if (n === 0) return { tier: 0, reason: 'صفقة بلا إشارات داعمة' };
@@ -313,20 +343,20 @@ function grade(r, mode) {
 
 /* قيد المراقبة: أعلى 3 تقييمًا من العملات التي لم تجتز الشروط، بلا أي حد أدنى. */
 function nearMiss(r) {
-  const D = r.D;
+  const D = ap(r), T = thr();
   const n = (r.A.pass ? 1 : 0) + (r.B.pass ? 1 : 0) + (r.C.pass ? 1 : 0);
   let score = n + (D.stGreen ? 1 : 0)
-    + Math.min(D.targetPct / CFG.D.minTarget, 1)
-    + Math.min(D.rr / CFG.D.minRR, 1)
-    + (D.stopPct <= CFG.D.maxStop ? 1 : CFG.D.maxStop / D.stopPct);
+    + Math.min(Math.max(D.targetPct, 0) / T.minTarget, 1)
+    + Math.min(Math.max(D.rr, 0) / T.minRR, 1)
+    + (D.stopPct <= T.maxStop ? 1 : T.maxStop / D.stopPct);
   if (r.B.suspect) score -= 1;
   const weak = r.low && !(r.B.pass && r.B.surge);
   if (weak) score -= 1;
   const gaps = [];
   if (!D.stGreen) gaps.push('Supertrend 4H سلبي');
-  if (D.targetPct < CFG.D.minTarget) gaps.push((D.sky ? 'الهدف المتوقع ' : 'المقاومة على بعد ') + D.targetPct.toFixed(1) + '%');
-  if (D.stopPct > CFG.D.maxStop) gaps.push('الوقف ' + D.stopPct.toFixed(1) + '%');
-  if (D.rr < CFG.D.minRR) gaps.push('العائد/المخاطرة ' + D.rr.toFixed(1));
+  if (D.targetPct < T.minTarget) gaps.push((D.sky ? 'الهدف المتوقع ' : 'المقاومة على بعد ') + D.targetPct.toFixed(1) + '%');
+  if (D.stopPct > T.maxStop) gaps.push('الوقف ' + D.stopPct.toFixed(1) + '%');
+  if (D.rr < T.minRR) gaps.push('العائد/المخاطرة ' + D.rr.toFixed(1));
   if (n === 0) gaps.push('لا إشارات داعمة');
   if (weak) gaps.push('سيولة ضعيفة');
   return { tier: 0, n, score, gaps };
@@ -401,13 +431,13 @@ async function pool(items, n, fn, tick) {
   if (S.abort) throw S.abort;
   return out;
 }
-const kl = (sym, iv, limit, start) => api(`/api/v3/klines?symbol=${sym}&interval=${iv}&limit=${limit}${start ? '&startTime=' + start : ''}`, W.klines).then(parseK);
+const kl = (sym, iv, limit, start, end) => api(`/api/v3/klines?symbol=${sym}&interval=${iv}&limit=${limit}${start ? '&startTime=' + start : ''}${end ? '&endTime=' + end : ''}`, W.klines).then(parseK);
 
 /* ===================== المسح ===================== */
 function setProgress(label, frac) { S.progress = { label, frac }; renderScanArea(); }
 
 async function scan() {
-  if (S.running) return;
+  if (S.running || S.bf) return;
   if (Date.now() < S.cooldownUntil || Date.now() < S.haltUntil) return;
   S.running = true; S.weight = 0; S.requests = 0; S.abort = null; S.error = null;
   render();
@@ -483,8 +513,8 @@ async function scan() {
       if (!g.tier) { ex(g.reason); near.push(Object.assign(r, nearMiss(r))); return; }
       picks.push(Object.assign(r, g));
     });
-    picks.sort((x, y) => y.tier - x.tier || y.D.rr - x.D.rr);
-    near.sort((x, y) => y.score - x.score || y.D.rr - x.D.rr);
+    picks.sort((x, y) => y.tier - x.tier || ap(y).rr - ap(x).rr);
+    near.sort((x, y) => y.score - x.score || ap(y).rr - ap(x).rr);
     near.splice(CFG.near.max);
 
     setProgress('تحديث السجل', 0.9);
@@ -505,50 +535,199 @@ async function scan() {
   }
 }
 
-/* ===================== السجل الظلي ===================== */
+/* ===================== السجل الظلي: عدة خطط على نفس الإشارة ===================== */
+/* A = الخطة الأصلية (الحقول المسطحة). W = وقف واسع. S = وقف واسع + جني جزئي. P = وقف واسع + دخول عند تراجع. */
+function buildPlans(a, atr) {
+  const V = CFG.V2;
+  if (!(atr > 0)) return {};
+  const Wp = { e: a.e, s: Math.min(a.s, a.e - V.stopAtr * atr), t: Math.min(a.t, a.e + V.reachAtr * atr) };
+  if (!(Wp.t > Wp.e) || !(Wp.s < Wp.e)) return {};
+  return {
+    W: Wp,
+    S: { e: Wp.e, s: Wp.s, t: Wp.t },
+    P: { e: a.e - V.pullAtr * atr, s: Wp.s, t: Wp.t, ttl: V.pullTTLh * 36e5 },
+  };
+}
 function addToJournal(picks, mode) {
   const openSyms = new Set(S.journal.filter(j => j.status === 'open').map(j => j.sym));
   const t = Date.now();
   for (const p of picks) {
     if (openSyms.has(p.sym)) continue;
-    S.journal.push({ id: p.sym + '-' + t, sym: p.sym, tier: p.tier, mode, t, entry: p.D.entry, stop: p.D.stop, target: p.D.target, status: 'open' });
+    const j = {
+      id: p.sym + '-' + t, sym: p.sym, tier: p.tier, mode, t,
+      entry: p.D.entry, stop: p.D.stop, target: p.D.target, status: 'open',
+      f: { atrPct: p.D.atrPct, ratio: p.A.ratio, move: p.A.move, volR: p.B.volR, trR: p.B.trR, sizeR: p.B.sizeR, rel3: p.C.rel3, rel7: p.C.rel7, chg: p.chg, qv: p.qv, spread: p.spread, sky: p.D.sky, sigs: (p.A.pass ? 'A' : '') + (p.B.pass ? 'B' : '') + (p.C.pass ? 'C' : '') },
+    };
+    j.pl = buildPlans({ e: j.entry, s: j.stop, t: j.target }, p.D.atr);
+    S.journal.push(j);
   }
   store.set('journal', S.journal);
 }
-async function evaluateJournal() {
-  const horizon = CFG.journal.horizonDays * 864e5;
-  const open = S.journal.filter(j => j.status === 'open').sort((a, b) => a.t - b.t).slice(0, CFG.journal.maxEval);
-  if (!open.length) return;
-  const res = await pool(open, CFG.conc, j => kl(j.sym, '1h', 250, j.t));
-  open.forEach((j, i) => {
-    const ks = res[i];
-    if (!ks || ks.err) return;
-    const cs = closedK(ks).filter(k => k.t >= j.t);
-    for (const k of cs) {
-      if (k.t - j.t >= horizon) break;
-      if (k.l <= j.stop) { closeTrade(j, 'loss', j.stop, k.ct); return; }
-      if (k.h >= j.target) { closeTrade(j, 'win', j.target, k.ct); return; }
+
+function mk(status, price, when, p, t0, extra) {
+  return Object.assign({ status, exit: price, closeT: when, result: (price / p.e - 1) * 100, risk: (p.e - p.s) / p.e * 100, days: (when - t0) / 864e5 }, extra || {});
+}
+/* وقف وهدف ثابتان. إذا لمست الشمعة الاثنين تُحسب خسارة. */
+function simStd(p, cs, t0, expired) {
+  for (const k of cs) {
+    if (k.l <= p.s) return mk('loss', p.s, k.ct, p, t0);
+    if (k.h >= p.t) return mk('win', p.t, k.ct, p, t0);
+  }
+  if (expired && cs.length) { const k = cs[cs.length - 1]; return mk('expired', k.c, k.ct, p, t0); }
+  return { status: 'open' };
+}
+/* جني 50% عند الهدف، ثم الوقف إلى سعر الدخول، والنصف الباقي يخرج عند تعادل أو عند ext × مسافة الهدف. */
+function simScale(p, cs, t0, expired) {
+  const risk = (p.e - p.s) / p.e * 100;
+  let hit = -1;
+  for (let i = 0; i < cs.length; i++) {
+    const k = cs[i];
+    if (k.l <= p.s) return mk('loss', p.s, k.ct, p, t0);
+    if (k.h >= p.t) { hit = i; break; }
+  }
+  if (hit < 0) {
+    if (expired && cs.length) { const k = cs[cs.length - 1]; return mk('expired', k.c, k.ct, p, t0); }
+    return { status: 'open' };
+  }
+  const t1 = (p.t / p.e - 1) * 100;
+  const t2 = p.e + CFG.V2.ext * (p.t - p.e);
+  const fin = (rest, when) => ({ status: 'win', exit: null, closeT: when, result: 0.5 * t1 + 0.5 * rest, risk, days: (when - t0) / 864e5 });
+  for (let i = hit + 1; i < cs.length; i++) {
+    const k = cs[i];
+    if (k.l <= p.e) return fin(0, k.ct);
+    if (k.h >= t2) return fin((t2 / p.e - 1) * 100, k.ct);
+  }
+  if (expired && cs.length) { const k = cs[cs.length - 1]; return fin((k.c / p.e - 1) * 100, k.ct); }
+  return { status: 'open' };
+}
+/* أمر limit عند تراجع، صالح مدة محددة. يُلغى إذا وصل الهدف قبل التنفيذ. */
+function simPull(p, cs, t0, now, expired) {
+  let fi = -1;
+  for (let i = 0; i < cs.length; i++) {
+    const k = cs[i];
+    if (k.t - t0 >= p.ttl) return { status: 'nofill' };
+    if (k.l <= p.e) { fi = i; break; }
+    if (k.h >= p.t) return { status: 'nofill' };
+  }
+  if (fi < 0) return now - t0 >= p.ttl ? { status: 'nofill' } : { status: 'pending' };
+  const k0 = cs[fi], tf = k0.t;
+  if (k0.l <= p.s) return mk('loss', p.s, k0.ct, p, tf);
+  return simStd(p, cs.slice(fi + 1), tf, expired);
+}
+
+function closeTrade(j, r) { j.status = r.status; j.exit = r.exit; j.closeT = r.closeT; j.result = r.result; j.days = r.days; }
+function excursions(j, cs) {
+  if (j.status === 'open' || j.mfe !== undefined || !j.closeT) return;
+  let hi = j.entry, lo = j.entry;
+  for (const k of cs) { if (k.ct >= j.closeT) break; if (k.h > hi) hi = k.h; if (k.l < lo) lo = k.l; }
+  j.mfe = (hi / j.entry - 1) * 100; j.mae = (lo / j.entry - 1) * 100;
+}
+/* هل وصل السعر إلى الهدف بعد أن ضُرب الوقف (داخل نفس المدة)؟ */
+function recovery(j, cs, expired) {
+  if (j.status !== 'loss' || j.rec !== undefined) return;
+  for (const k of cs) {
+    if (k.t > j.closeT && k.h >= j.target) { j.rec = true; j.recD = (k.ct - j.t) / 864e5; return; }
+  }
+  if (expired) j.rec = false;
+}
+function runSim(j, ks, now) {
+  const hz = CFG.journal.horizonDays * 864e5;
+  const cs = closedK(ks, now).filter(k => k.t >= j.t && k.t - j.t < hz);
+  const expired = now - j.t >= hz;
+  if (j.status === 'open') {
+    const r = simStd({ e: j.entry, s: j.stop, t: j.target }, cs, j.t, expired);
+    if (r.status !== 'open') closeTrade(j, r);
+  }
+  if (j.pl) {
+    j.alt = j.alt || {};
+    for (const key of ['W', 'S', 'P']) {
+      const p = j.pl[key], cur = j.alt[key];
+      if (!p || (cur && cur.status !== 'open' && cur.status !== 'pending')) continue;
+      j.alt[key] = key === 'S' ? simScale(p, cs, j.t, expired) : key === 'P' ? simPull(p, cs, j.t, now, expired) : simStd(p, cs, j.t, expired);
     }
-    const lastIn = cs.filter(k => k.t - j.t < horizon).pop();
-    if (Date.now() - j.t >= horizon && lastIn) closeTrade(j, 'expired', lastIn.c, lastIn.ct);
-  });
+  }
+  excursions(j, cs);
+  recovery(j, cs, expired);
+}
+function needsEval(j) {
+  const hz = CFG.journal.horizonDays * 864e5;
+  if (j.status === 'open') return true;
+  if (j.pl && !j.alt) return true;
+  if (j.alt && Object.values(j.alt).some(a => a.status === 'open' || a.status === 'pending')) return true;
+  if (j.status === 'loss' && j.rec === undefined && j.pl) return true;
+  if (j.status === 'loss' && j.rec === undefined && Date.now() - j.t < hz) return true;
+  return false;
+}
+async function evaluateJournal() {
+  const list = S.journal.filter(needsEval).sort((a, b) => a.t - b.t).slice(0, CFG.journal.maxEval);
+  if (!list.length) return;
+  const res = await pool(list, CFG.conc, j => kl(j.sym, '1h', 250, j.t));
+  const now = Date.now();
+  list.forEach((j, i) => { const ks = res[i]; if (!ks || ks.err) return; runSim(j, ks, now); });
   store.set('journal', S.journal);
 }
-function closeTrade(j, status, price, when) {
-  j.status = status; j.exit = price; j.closeT = when;
-  j.result = (price / j.entry - 1) * 100;
-  j.days = (when - j.t) / 864e5;
+
+/* تحليل رجعي: يجلب الشموع من المتصفح نفسه لكل صفقة قديمة ويعيد بناء الخطط البديلة والتشخيص. */
+async function backfill() {
+  if (S.running || S.bf) return;
+  if (Date.now() < S.haltUntil) { S.bfMsg = 'Binance طلبت التوقف مؤقتًا. حاول بعد قليل.'; render(); return; }
+  const items = S.journal.filter(j => !j.pl).slice(0, 60);
+  if (!items.length) { S.bfMsg = 'كل صفقات السجل محلّلة.'; render(); return; }
+  S.bf = { done: 0, n: items.length }; S.bfMsg = null; S.weight = 0; S.abort = null; render();
+  try {
+    await ensureBase();
+    await pool(items, CFG.conc, async j => {
+      const [k1, k4] = await Promise.all([kl(j.sym, '1h', 250, j.t), kl(j.sym, '4h', 40, null, j.t)]);
+      const c4 = closedK(k4, j.t);
+      const atr = atrSeries(c4, CFG.D.atrLen).pop();
+      j.pl = buildPlans({ e: j.entry, s: j.stop, t: j.target }, atr);
+      if (atr > 0) j.f = Object.assign({}, j.f, { atrPct: atr / j.entry * 100 });
+      runSim(j, k1, Date.now());
+      j.retro = true;
+    }, (d) => { S.bf.done = d; if (S.tab === 'journal') render(); });
+    store.set('journal', S.journal);
+    const left = S.journal.filter(j => !j.pl).length;
+    S.bfMsg = 'اكتمل التحليل.' + (left ? ' تبقّت ' + left + ' صفقة، اضغط مرة أخرى.' : ' انسخ السجل من الأسفل والصقه في المحادثة.');
+  } catch (e) {
+    store.set('journal', S.journal);
+    S.bfMsg = e.halt ? 'Binance طلبت التوقف مؤقتًا، وحُفظ ما اكتمل. أعد المحاولة بعد دقائق.' : e.conn ? 'تعذر الوصول إلى Binance. افتح الإعدادات واضغط "اختبار الاتصال".' : 'توقف التحليل: ' + e.message;
+  } finally { S.bf = null; render(); }
 }
-function journalStats() {
-  return [3, 2, 1, 0].map(tier => {
-    const done = S.journal.filter(j => j.tier === tier && j.status !== 'open');
-    const wins = done.filter(j => j.status === 'win');
-    const winDays = wins.length ? sum(wins, j => j.days) / wins.length : 0;
-    return {
-      tier, n: done.length, open: S.journal.filter(j => j.tier === tier && j.status === 'open').length,
-      winRate: done.length ? wins.length / done.length * 100 : 0,
-      avg: done.length ? sum(done, j => j.result) / done.length : 0, winDays,
-    };
+
+/* ===================== إحصاءات السجل ===================== */
+function planRes(j, key) {
+  if (key === 'A') return j.status === 'open' ? null : { status: j.status, result: j.result, risk: (j.entry - j.stop) / j.entry * 100 };
+  const a = j.alt && j.alt[key];
+  return a && a.risk != null ? a : null;
+}
+function planStats(key, filter) {
+  const list = S.journal.filter(j => !filter || filter(j));
+  const rs = list.map(j => planRes(j, key)).filter(Boolean);
+  const wins = rs.filter(r => r.status === 'win');
+  const skipped = key === 'P' ? list.filter(j => j.alt && j.alt.P && j.alt.P.status === 'nofill').length : 0;
+  return {
+    n: rs.length, win: rs.length ? wins.length / rs.length * 100 : 0, skipped,
+    avgR: rs.length ? sum(rs, r => r.result / r.risk) / rs.length : 0,
+    avg: rs.length ? sum(rs, r => r.result) / rs.length : 0,
+  };
+}
+function diag() {
+  const cl = S.journal.filter(j => j.status !== 'open');
+  const loss = cl.filter(j => j.status === 'loss');
+  const lossK = loss.filter(j => j.rec !== undefined);
+  const mf = loss.filter(j => j.mfe !== undefined);
+  const wins = cl.filter(j => j.status === 'win' && j.mae !== undefined);
+  return {
+    nLoss: loss.length, fast: loss.filter(j => j.days < 1).length,
+    lossK: lossK.length, rec: lossK.filter(j => j.rec).length,
+    prog: mf.length ? sum(mf, j => Math.min(1, j.mfe / ((j.target / j.entry - 1) * 100))) / mf.length * 100 : null,
+    wmae: wins.length ? sum(wins, j => j.mae) / wins.length : null,
+  };
+}
+function bucketRows(items, val, edges, labels) {
+  return labels.map((lb, i) => {
+    const g = items.filter(j => { const v = val(j); return v != null && isFinite(v) && v >= edges[i] && v < edges[i + 1]; });
+    return { lb, n: g.length, w: g.filter(j => j.status === 'win').length, avg: g.length ? sum(g, j => j.result) / g.length : 0 };
   });
 }
 
@@ -571,6 +750,7 @@ function regimeHTML() {
     <div class="facts">
       <span>اتساع السوق <b class="num">${b.toFixed(0)}%</b></span>
       <span>BTC <b>${R.btcUp ? 'فوق' : 'تحت'}</b> متوسط 50 يومًا${!R.btcUp && R.btcFalling ? ' وهابط' : ''}</span>
+      <span>الاستراتيجية <b class="num">${profile()}</b></span>
     </div>
   </section>`;
 }
@@ -579,6 +759,7 @@ function scanAreaHTML() {
   const now = Date.now();
   let label = 'مسح الآن', dis = false;
   if (S.running) { label = S.progress ? S.progress.label + '…' : 'جارٍ المسح…'; dis = true; }
+  else if (S.bf) { label = 'جلب شموع السجل…'; dis = true; }
   else if (now < S.haltUntil) { label = 'متوقف مؤقتًا ' + Math.ceil((S.haltUntil - now) / 1000) + ' ث'; dis = true; }
   else if (now < S.cooldownUntil) { label = 'المسح التالي بعد ' + Math.ceil((S.cooldownUntil - now) / 1000) + ' ث'; dis = true; }
   const frac = S.running && S.progress ? S.progress.frac : 0;
@@ -599,14 +780,22 @@ function scanAreaHTML() {
 
 function pickHTML(p) {
   const open = S.open[p.sym];
-  const D = p.D;
+  const D = ap(p);
   const sig = (k, on, title) => `<span class="sig ${on ? 'on' : ''}" title="${title}">${k}</span>`;
+  const rk = +S.settings.riskUsd || 0;
   const flags = [];
   if (p.low) flags.push(`<span class="flag gold">سيولة استثنائية</span>`);
   if (p.B.suspect) flags.push(`<span class="flag warn">اشتباه ضخ</span>`);
   if (D.sky) flags.push(`<span class="flag">قمة جديدة: الهدف مبني على ATR</span>`);
+  if (rk > 0 && D.stopPct > 0 && p.tier > 0) flags.push(`<span class="flag gold">حجم المركز <span class="num">$${Math.round(rk / (D.stopPct / 100))}</span> لمخاطرة <span class="num">$${rk}</span></span>`);
   if (p.gaps) p.gaps.forEach(g => flags.push(`<span class="flag gap">لم تجتز: ${esc(g)}</span>`));
   if (p.capped) flags.push(`<span class="flag">خُفّضت بسبب وضع السوق (${TIER[p.raw]})</span>`);
+  const V = CFG.V2;
+  const alt = p.V && p.D.atr > 0 ? `
+      <dt>الخطة الأصلية (وقف / هدف)</dt><dd class="num">${fmtPct(-p.D.stopPct)} / ${fmtPct(p.D.targetPct)}</dd>
+      <dt>ATR 4H</dt><dd class="num">${p.D.atrPct.toFixed(2)}%</dd>
+      <dt>جني جزئي (قيد الاختبار)</dt><dd>50% عند الهدف ثم وقف التعادل حتى <span class="num">${fmtP(D.entry + V.ext * (D.target - D.entry))}</span></dd>
+      <dt>دخول عند تراجع (قيد الاختبار)</dt><dd class="num">${fmtP(D.entry - V.pullAtr * p.D.atr)}</dd>` : '';
   return `<article class="row" data-tier="${p.tier}" data-action="toggle" data-sym="${esc(p.sym)}" aria-expanded="${!!open}">
     <div class="top"><span class="sym">${esc(p.base)}<small>USDT</small></span><span class="tier">${TIER[p.tier]}</span></div>
     <div class="sigs">${sig('A', p.A.pass, 'طلب عدواني')}${sig('B', p.B.pass, 'مشاركة موزعة')}${sig('C', p.C.pass, 'قوة أمام BTC')}${sig('D', p.tier > 0, 'صفقة صالحة')}</div>
@@ -619,7 +808,7 @@ function pickHTML(p) {
     ${flags.length ? `<div class="flags">${flags.join('')}</div>` : ''}
     ${open ? `<div class="detail"><dl>
       <dt>سعر الوقف</dt><dd class="num">${fmtP(D.stop)}</dd>
-      <dt>سعر الهدف</dt><dd class="num">${fmtP(D.target)}</dd>
+      <dt>سعر الهدف</dt><dd class="num">${fmtP(D.target)}</dd>${alt}
       <dt>نسبة شراء الـ taker (48 س)</dt><dd class="num">${(p.A.ratio * 100).toFixed(1)}%</dd>
       <dt>حركة السعر (48 س)</dt><dd class="num">${fmtPct(p.A.move)}</dd>
       <dt>الحجم مقابل متوسط 6 أيام</dt><dd class="num">×${p.B.volR.toFixed(2)}</dd>
@@ -645,29 +834,61 @@ function picksHTML() {
   if (L.near && L.near.length) html += `<section class="group"><h2>قيد المراقبة <span class="num">(${L.near.length})</span></h2><p class="help">الأقرب للشروط لكنها لم تجتزها. ليست إشارة دخول: انتظر اكتمالها، أو ادخل بحجم أصغر وأنت تعرف ما ينقصها.</p>${L.near.map(pickHTML).join('')}</section>`;
   const ex = Object.entries(L.excluded).sort((a, b) => b[1] - a[1]);
   if (ex.length) html += `<details class="excl"><summary>لماذا استُبعدت البقية (<span class="num">${sum(ex, e => e[1])}</span>)</summary><ul>${ex.map(([k, v]) => `<li><span>${esc(k)}</span><span class="num">${v}</span></li>`).join('')}</ul></details>`;
+  const V = CFG.V2;
   html += `<details class="legend"><summary>معنى الرموز</summary>
     <p><b>A</b> طلب عدواني: المشترون يدفعون السعر بهدوء، ولم يتمدد بعد.</p>
     <p><b>B</b> مشاركة موزعة: الحجم وعدد الصفقات يرتفعان معًا، بلا صفقات ضخمة مشبوهة.</p>
     <p><b>C</b> قوة أمام BTC: تتفوق على البيتكوين خلال 3 و7 أيام.</p>
-    <p><b>D</b> صفقة صالحة: Supertrend 4H إيجابي، هدف 5% أو أكثر قبل المقاومة، وعائد/مخاطرة 2 أو أكثر. شرط إلزامي لكل ما يظهر.</p>
+    <p><b>D</b> صفقة صالحة: ${profile() === 'v2'
+      ? `Supertrend 4H إيجابي، ووقف لا يقل عن ${V.stopAtr}×ATR، وهدف واقعي (أقرب مقاومة بحد أقصى ${V.reachAtr}×ATR) لا يقل عن ${V.minTarget}%، وعائد/مخاطرة ${V.minRR} أو أكثر. الحجم يُحسب بمخاطرة ثابتة.`
+      : `Supertrend 4H إيجابي، هدف 5% أو أكثر قبل المقاومة، وعائد/مخاطرة 2 أو أكثر.`} شرط إلزامي لكل ما يظهر.</p>
     <p>ممتاز = D مع A وB وC. جيد جدًا = D مع اثنتين. جيد = D مع واحدة.</p>
     <p>قيد المراقبة = أعلى 3 تقييمًا من العملات التي لم تجتز الشروط، مع ما ينقص كل واحدة. ليست جاهزة للدخول. تُسجَّل في السجل كفئة مستقلة.</p></details>`;
   return html;
 }
 
 function journalHTML() {
-  const st = journalStats();
   const target = CFG.journal.sample;
-  let html = `<h3>أداء كل فئة</h3>
-  <table><thead><tr><th>الفئة</th><th>مغلقة</th><th>أصابت الهدف</th><th>متوسط النتيجة</th></tr></thead><tbody>
+  const vp = S.vp || 'W';
+  const pending = S.journal.filter(j => !j.pl).length;
+  let html = `<button class="btn" data-action="backfill" ${S.bf || S.running ? 'disabled' : ''}>${S.bf ? 'جلب الشموع ' + S.bf.done + '/' + S.bf.n : 'تحليل رجعي للسجل' + (pending ? ' (' + pending + ')' : '')}</button>
+  ${S.bfMsg ? `<p class="help">${esc(S.bfMsg)}</p>` : `<p class="help">يجلب شموع كل صفقة قديمة ويعيد اختبارها بالخطط البديلة ويحسب التشخيص. لا يحتاج إلا اتصالك بـ Binance.</p>`}`;
+
+  html += `<h3>مقارنة الخطط على نفس الصفقات</h3>
+  <table><thead><tr><th>الخطة</th><th>مغلقة</th><th>هدف</th><th>R متوسط</th></tr></thead><tbody>
+  ${['A', 'W', 'S', 'P'].map(k => { const s = planStats(k); return `<tr><td>${PLN[k]}${s.skipped ? `<div class="muted" style="font-size:11.5px">فائتة ${s.skipped}</div>` : ''}</td><td class="num">${s.n}</td><td class="num">${s.n ? s.win.toFixed(0) + '%' : '—'}</td><td class="num ${s.n ? (s.avgR > 0 ? 'win' : 'loss') : ''}">${s.n ? fmtR(s.avgR) : '—'}</td></tr>`; }).join('')}
+  </tbody></table>
+  <p class="help">R = النتيجة ÷ مسافة الوقف: الموجب يعني أن الخطة تربح بمخاطرة ثابتة. كل الخطط تُختبر على نفس الإشارات والشموع، وإذا لمست الشمعة الوقف والهدف معًا تُحسب خسارة.</p>`;
+
+  const d = diag();
+  html += `<h3>لماذا خسرت الصفقات؟</h3>
+    <div class="jrow"><span>خسائر ضُربت خلال أقل من يوم</span><span class="num">${d.nLoss ? d.fast + '/' + d.nLoss : '—'}</span></div>
+    <div class="jrow"><span>ضُرب الوقف ثم بلغ السعر الهدف لاحقًا</span><span class="num">${d.lossK ? d.rec + '/' + d.lossK : '—'}</span></div>
+    <div class="jrow"><span>المسافة المقطوعة نحو الهدف قبل الوقف</span><span class="num">${d.prog == null ? '—' : d.prog.toFixed(0) + '%'}</span></div>
+    <div class="jrow"><span>أعمق تراجع للصفقات الرابحة قبل الهدف</span><span class="num">${d.wmae == null ? '—' : fmtPct(d.wmae)}</span></div>
+    <p class="help">إذا كان الرقم الثاني مرتفعًا فالوقف ضيق والاتجاه صحيح. إذا كان منخفضًا فالدخول نفسه خاطئ. الرقم الرابع هو أقل وقف كانت الرابحة ستتحمله.</p>`;
+
+  const done = S.journal.filter(j => j.status !== 'open');
+  const b1 = bucketRows(done, j => (j.entry - j.stop) / j.entry * 100, [0, 6, 9, 1000], ['وقف أقل من 6%', 'وقف 6–9%', 'وقف 9% فأكثر']);
+  const withAtr = done.filter(j => j.f && j.f.atrPct > 0);
+  const b2 = bucketRows(withAtr, j => ((j.entry - j.stop) / j.entry * 100) / j.f.atrPct, [0, 1.3, 2, 1000], ['أقل من 1.3×ATR', '1.3 إلى 2×ATR', '2×ATR فأكثر']);
+  const brow = r => `<tr><td>${r.lb}</td><td class="num">${r.n}</td><td class="num">${r.n ? (r.w / r.n * 100).toFixed(0) + '%' : '—'}</td><td class="num">${r.n ? fmtPct(r.avg) : '—'}</td></tr>`;
+  html += `<h3>الأداء حسب مسافة الوقف (الخطة الأصلية)</h3>
+    <table><thead><tr><th>المسافة</th><th>مغلقة</th><th>هدف</th><th>متوسط</th></tr></thead><tbody>${b1.map(brow).join('')}${withAtr.length ? b2.map(brow).join('') : ''}</tbody></table>`;
+
+  const st = [3, 2, 1, 0].map(tier => Object.assign({ tier }, planStats(vp, j => j.tier === tier)));
+  html += `<h3>أداء كل فئة</h3>
+  <div class="seg">${['A', 'W', 'S', 'P'].map(k => `<button class="btn ${vp === k ? 'on' : ''}" data-action="vp" data-plan="${k}">${PLN[k]}</button>`).join('')}</div>
+  <table><thead><tr><th>الفئة</th><th>مغلقة</th><th>أصابت الهدف</th><th>R متوسط</th></tr></thead><tbody>
   ${st.map(s => `<tr><td>${TIER[s.tier]}<div class="meter"><i style="width:${Math.min(100, s.n / target * 100)}%"></i></div></td>
     <td class="num">${s.n}/${target}</td>
-    <td class="num">${s.n ? s.winRate.toFixed(0) + '%' : '—'}</td>
-    <td class="num">${s.n ? fmtPct(s.avg) : '—'}</td></tr>`).join('')}
+    <td class="num">${s.n ? s.win.toFixed(0) + '%' : '—'}</td>
+    <td class="num">${s.n ? fmtR(s.avgR) : '—'}</td></tr>`).join('')}
   </tbody></table>
-  <p class="help">كل صفقة تُغلق عند أول لمس للهدف أو الوقف، أو بعد ${CFG.journal.horizonDays} أيام بسعر الإغلاق. إذا لمست الشمعة الاثنين تُحسب خسارة. الحكم على النظام يبدأ بعد ${target} صفقة مغلقة في كل فئة.</p>`;
+  <p class="help">كل صفقة تُغلق عند أول لمس للهدف أو الوقف، أو بعد ${CFG.journal.horizonDays} أيام بسعر الإغلاق. الحكم على النظام يبدأ بعد ${target} صفقة مغلقة في كل فئة.</p>`;
+
   const openJ = S.journal.filter(j => j.status === 'open').sort((a, b) => b.t - a.t);
-  const doneJ = S.journal.filter(j => j.status !== 'open').sort((a, b) => b.closeT - a.closeT).slice(0, 40);
+  const doneJ = done.sort((a, b) => b.closeT - a.closeT).slice(0, 40);
   html += `<h3>مفتوحة (<span class="num">${openJ.length}</span>)</h3>`;
   html += openJ.length ? openJ.map(j => `<div class="jrow"><span><b class="num">${esc(j.sym.replace('USDT', ''))}</b> ${TIER[j.tier]}</span><span class="muted">${ago(j.t)}</span></div>`).join('') : `<p class="help">تُضاف كل فرصة تظهر في المسح تلقائيًا.</p>`;
   html += `<h3>مغلقة مؤخرًا</h3>`;
@@ -694,8 +915,17 @@ const WORKER = `export default {
 };`;
 
 function settingsHTML() {
-  const s = S.settings;
-  return `<label for="exBox">عملات مستبعدة دائمًا (ميم أو أي عملة لا تثق بها)</label>
+  const s = S.settings, V = CFG.V2;
+  return `<label for="pfBox">الاستراتيجية</label>
+    <select id="pfBox">
+      <option value="v2" ${profile() === 'v2' ? 'selected' : ''}>v2: وقف خارج الضجيج وهدف واقعي (الافتراضية)</option>
+      <option value="v1" ${profile() === 'v1' ? 'selected' : ''}>v1: الأصلية (عائد/مخاطرة 2 فأكثر)</option>
+    </select>
+    <p class="help">السجل يختبر الخطتين معًا بغض النظر عن اختيارك، فلن تضيع المقارنة.</p>
+    <label for="rkBox">مخاطرة الصفقة بالدولار</label>
+    <input id="rkBox" type="text" inputmode="decimal" value="${esc(s.riskUsd)}">
+    <p class="help">يُحسب حجم المركز = المخاطرة ÷ مسافة الوقف، فتخسر المبلغ نفسه في كل وقف مهما اتسع.</p>
+    <label for="exBox">عملات مستبعدة دائمًا (ميم أو أي عملة لا تثق بها)</label>
     <textarea id="exBox">${esc(s.exclude)}</textarea>
     <p class="help">اكتب رمز العملة فقط، وافصل بفاصلة. العملات المستقرة وBTC مستبعدة تلقائيًا.</p>
     <label for="pxBox">رابط الوسيط (اختياري)</label>
@@ -713,9 +943,11 @@ function settingsHTML() {
     <details class="legend"><summary>العتبات الحالية</summary>
       <p>A: شراء taker ≥ ${CFG.A.ratio * 100}% خلال ${CFG.A.hours} ساعة، وحركة بين ${CFG.A.minMove}% و${CFG.A.maxMove}%.</p>
       <p>B: الحجم ≥ ×${CFG.B.vol}، عدد الصفقات يتبعه بنسبة ${CFG.B.follow * 100}%، حجم الصفقة ≤ ×${CFG.B.size}. اشتباه ضخ فوق ×${CFG.B.suspect}.</p>
-      <p>D: هدف ≥ ${CFG.D.minTarget}%، عائد/مخاطرة ≥ ${CFG.D.minRR}، وقف ≤ ${CFG.D.maxStop}%.</p>
+      <p>D v1: هدف ≥ ${CFG.D.minTarget}%، عائد/مخاطرة ≥ ${CFG.D.minRR}، وقف ≤ ${CFG.D.maxStop}%.</p>
+      <p>D v2: وقف = الأوسع بين آخر قاع و${V.stopAtr}×ATR وبحد أقصى ${V.maxStop}%، هدف = أقرب مقاومة بحد أقصى ${V.reachAtr}×ATR، هدف ≥ ${V.minTarget}%، عائد/مخاطرة ≥ ${V.minRR}.</p>
+      <p>الخطط التجريبية: جني ${50}% عند الهدف ثم وقف التعادل حتى ×${V.ext} من مسافة الهدف. دخول بأمر limit عند ${V.pullAtr}×ATR تحت السعر لمدة ${V.pullTTLh} ساعة.</p>
       <p>الفلاتر: حجم ≥ $5M (أو $1.5M مع دخول حجم صحي ×${CFG.B.surge})، صعود يومي ≤ ${CFG.chaseMax}%، فارق سعري ≤ ${CFG.spreadMax}%، عمر ≥ ${CFG.minDays} يومًا.</p>
-      <p>قيد المراقبة: أعلى ${CFG.near.max} تقييمًا بلا حد أدنى.</p>
+      <p>قيد المراقبة: أعلى ${CFG.near.max} تقييمًا بلا حد أدنى. مدة الصفقة في السجل ${CFG.journal.horizonDays} أيام.</p>
       <p>هذه قيم ابتدائية. تُعدَّل بعد تحليل السجل فقط.</p></details>`;
 }
 
@@ -746,13 +978,21 @@ function onClick(e) {
   const act = a.dataset.action;
   if (act === 'scan') scan();
   else if (act === 'toggle') { if (e.target.closest('a')) return; S.open[a.dataset.sym] = !S.open[a.dataset.sym]; render(); }
+  else if (act === 'vp') { S.vp = a.dataset.plan; render(); }
+  else if (act === 'backfill') backfill();
   else if (act === 'saveSettings') {
-    S.settings = { exclude: document.getElementById('exBox').value, proxy: document.getElementById('pxBox').value.trim() };
+    const rk = parseFloat(document.getElementById('rkBox').value);
+    S.settings = {
+      exclude: document.getElementById('exBox').value,
+      proxy: document.getElementById('pxBox').value.trim(),
+      profile: document.getElementById('pfBox').value === 'v1' ? 'v1' : 'v2',
+      riskUsd: isFinite(rk) && rk > 0 ? rk : 10,
+    };
     S.base = null; store.set('settings', S.settings); S.msg = 'حُفظت الإعدادات. تُطبَّق في المسح القادم.'; render();
   }
   else if (act === 'testConn') testConn();
   else if (act === 'export') {
-    S.exportText = JSON.stringify({ app: 'radar-v1', exported: new Date().toISOString(), cfg: CFG, journal: S.journal });
+    S.exportText = JSON.stringify({ app: 'radar-v2', exported: new Date().toISOString(), cfg: CFG, journal: S.journal });
     S.msg = null;
     if (navigator.clipboard) navigator.clipboard.writeText(S.exportText).then(() => { S.msg = 'نُسخ السجل. الصقه في ملاحظاتك أو في محادثة Claude.'; render(); }).catch(() => render());
     render();
@@ -765,7 +1005,7 @@ function onClick(e) {
       if (!Array.isArray(list)) throw new Error();
       const ids = new Set(S.journal.map(j => j.id)); let added = 0;
       for (const j of list) if (j && j.id && j.sym && !ids.has(j.id)) { S.journal.push(j); added++; }
-      store.set('journal', S.journal); S.showImport = false; S.msg = 'أُضيفت ' + added + ' صفقة إلى السجل.';
+      store.set('journal', S.journal); S.showImport = false; S.msg = 'أُضيفت ' + added + ' صفقة إلى السجل. اضغط "تحليل رجعي للسجل" لتحليل الجديد منها.';
     } catch (err) { S.msg = 'النص غير صالح. الصق النسخة كما هي دون تعديل.'; }
     render();
   }
@@ -780,7 +1020,7 @@ if (typeof document !== 'undefined' && document.getElementById) {
   render();
   setInterval(() => { if (!S.running && (Date.now() < S.cooldownUntil + 1500 || Date.now() < S.haltUntil + 1500)) renderScanArea(); }, 1000);
 }
-if (typeof module !== 'undefined') module.exports = { analyze, grade, regimeOf, supertrend, atrSeries, ema, resistances, parseK, closedK, CFG, S };
+if (typeof module !== 'undefined') module.exports = { analyze, grade, regimeOf, supertrend, atrSeries, ema, resistances, parseK, closedK, buildPlans, simStd, simScale, simPull, runSim, planStats, diag, CFG, S };
 </script>
 </body>
 </html>
