@@ -146,7 +146,7 @@ const CFG = {
   // الاستراتيجية القديمة (v1): تبقى متاحة من الإعدادات
   D: { stLen: 10, stMult: 3, atrLen: 14, swing: 12, minTarget: 5, minRR: 2, maxStop: 12, pivot: 3, look: 180 },
   // الاستراتيجية الجديدة (v2): وقف خارج ضجيج السوق، وهدف في مدى الحركة الفعلي
-  V2: { stopAtr: 2, maxStop: 14, reachAtr: 2, minTarget: 4, minRR: 0.6, ext: 1.8, pullAtr: 0.6, pullTTLh: 12 },
+  V2: { stopAtr: 2, maxStop: 14, reachAtr: 2, minTarget: 4, minRR: 0.4, ext: 1.8, pullAtr: 0.6, pullTTLh: 12 },
   regime: { attack: 55, defense: 35 },
   journal: { horizonDays: 7, maxEval: 40, sample: 40 },
   near: { max: 3 },
@@ -160,7 +160,7 @@ const MODE = {
   selective: { word: 'انتقائي', cap: 2, note: 'السوق مختلط. أعلى فئة معروضة: جيد جدًا.' },
   defense:   { word: 'دفاع',    cap: 1, note: 'السيولة تنسحب. أعلى فئة معروضة: جيد، وبحجم أصغر.' },
 };
-const PLN = { A: 'الأصلية', W: 'وقف واسع', S: 'واسع + جني جزئي', P: 'واسع + دخول عند تراجع' };
+const PLN = { A: 'الأصلية', W: 'وقف واسع', S: 'واسع + جني جزئي', R: 'جني جزئي + ركض للهدف الأصلي', P: 'واسع + دخول عند تراجع' };
 
 /* ===================== التخزين ===================== */
 const store = {
@@ -542,11 +542,13 @@ function buildPlans(a, atr) {
   if (!(atr > 0)) return {};
   const Wp = { e: a.e, s: Math.min(a.s, a.e - V.stopAtr * atr), t: Math.min(a.t, a.e + V.reachAtr * atr) };
   if (!(Wp.t > Wp.e) || !(Wp.s < Wp.e)) return {};
-  return {
+  const out = {
     W: Wp,
     S: { e: Wp.e, s: Wp.s, t: Wp.t },
     P: { e: a.e - V.pullAtr * atr, s: Wp.s, t: Wp.t, ttl: V.pullTTLh * 36e5 },
   };
+  if (a.t > Wp.t * 1.0001) out.R = { e: Wp.e, s: Wp.s, t: Wp.t, t2: a.t };
+  return out;
 }
 function addToJournal(picks, mode) {
   const openSyms = new Set(S.journal.filter(j => j.status === 'open').map(j => j.sym));
@@ -590,7 +592,7 @@ function simScale(p, cs, t0, expired) {
     return { status: 'open' };
   }
   const t1 = (p.t / p.e - 1) * 100;
-  const t2 = p.e + CFG.V2.ext * (p.t - p.e);
+  const t2 = p.t2 > p.t ? p.t2 : p.e + CFG.V2.ext * (p.t - p.e);
   const fin = (rest, when) => ({ status: 'win', exit: null, closeT: when, result: 0.5 * t1 + 0.5 * rest, risk, days: (when - t0) / 864e5 });
   for (let i = hit + 1; i < cs.length; i++) {
     const k = cs[i];
@@ -640,10 +642,11 @@ function runSim(j, ks, now) {
   }
   if (j.pl) {
     j.alt = j.alt || {};
-    for (const key of ['W', 'S', 'P']) {
+    if (j.pl.W && !j.pl.R && j.target > j.pl.W.t * 1.0001) j.pl.R = { e: j.pl.W.e, s: j.pl.W.s, t: j.pl.W.t, t2: j.target };
+    for (const key of ['W', 'S', 'R', 'P']) {
       const p = j.pl[key], cur = j.alt[key];
       if (!p || (cur && cur.status !== 'open' && cur.status !== 'pending')) continue;
-      j.alt[key] = key === 'S' ? simScale(p, cs, j.t, expired) : key === 'P' ? simPull(p, cs, j.t, now, expired) : simStd(p, cs, j.t, expired);
+      j.alt[key] = (key === 'S' || key === 'R') ? simScale(p, cs, j.t, expired) : key === 'P' ? simPull(p, cs, j.t, now, expired) : simStd(p, cs, j.t, expired);
     }
   }
   excursions(j, cs);
@@ -653,6 +656,7 @@ function needsEval(j) {
   const hz = CFG.journal.horizonDays * 864e5;
   if (j.status === 'open') return true;
   if (j.pl && !j.alt) return true;
+  if (j.pl && j.pl.W && !j.pl.R && j.target > j.pl.W.t * 1.0001) return true;
   if (j.alt && Object.values(j.alt).some(a => a.status === 'open' || a.status === 'pending')) return true;
   if (j.status === 'loss' && j.rec === undefined && j.pl) return true;
   if (j.status === 'loss' && j.rec === undefined && Date.now() - j.t < hz) return true;
@@ -691,6 +695,30 @@ async function backfill() {
   } catch (e) {
     store.set('journal', S.journal);
     S.bfMsg = e.halt ? 'Binance طلبت التوقف مؤقتًا، وحُفظ ما اكتمل. أعد المحاولة بعد دقائق.' : e.conn ? 'تعذر الوصول إلى Binance. افتح الإعدادات واضغط "اختبار الاتصال".' : 'توقف التحليل: ' + e.message;
+  } finally { S.bf = null; render(); }
+}
+
+/* تصدير الشموع بصيغة مضغوطة (نقاط أساس من سعر الدخول) لتحليل أعمق خارج التطبيق. */
+async function exportCandles() {
+  if (S.running || S.bf) return;
+  if (Date.now() < S.haltUntil) { S.bfMsg = 'Binance طلبت التوقف مؤقتًا. حاول بعد قليل.'; render(); return; }
+  const items = S.journal.slice(-80);
+  if (!items.length) { S.bfMsg = 'السجل فارغ.'; render(); return; }
+  S.bf = { done: 0, n: items.length }; S.bfMsg = null; S.weight = 0; S.abort = null; S.exportText = null; render();
+  try {
+    await ensureBase();
+    const out = [];
+    await pool(items, CFG.conc, async j => {
+      const ks = await kl(j.sym, '1h', 130, j.t);
+      const c = closedK(ks).filter(k => k.t >= j.t);
+      const e = j.entry, bp = x => Math.round((x / e - 1) * 1e4);
+      const t0 = c.length ? c[0].t : j.t;
+      out.push({ s: j.sym.replace('USDT', ''), tier: j.tier, t: j.t, e, a: j.f && j.f.atrPct ? +j.f.atrPct.toFixed(3) : null, st: j.stop, tg: j.target, t0, k: c.map(k => [Math.round((k.t - t0) / 36e5), bp(k.h), bp(k.l), bp(k.c)]) });
+    }, d => { S.bf.done = d; if (S.tab === 'journal') render(); });
+    S.exportText = JSON.stringify({ app: 'radar-candles', exported: new Date().toISOString(), units: 'k=[hourIdx,high,low,close] بنقاط أساس من سعر الدخول؛ الشمعة الأولى تبدأ عند t0', trades: out });
+    S.bfMsg = 'جاهزة (' + out.length + ' صفقة). اضغط "نسخ النص" ثم الصقه في المحادثة.';
+  } catch (e) {
+    S.bfMsg = e.halt ? 'Binance طلبت التوقف مؤقتًا. أعد المحاولة بعد دقائق.' : e.conn ? 'تعذر الوصول إلى Binance. افتح الإعدادات واضغط "اختبار الاتصال".' : 'توقف الجلب: ' + e.message;
   } finally { S.bf = null; render(); }
 }
 
@@ -795,6 +823,7 @@ function pickHTML(p) {
       <dt>الخطة الأصلية (وقف / هدف)</dt><dd class="num">${fmtPct(-p.D.stopPct)} / ${fmtPct(p.D.targetPct)}</dd>
       <dt>ATR 4H</dt><dd class="num">${p.D.atrPct.toFixed(2)}%</dd>
       <dt>جني جزئي (قيد الاختبار)</dt><dd>50% عند الهدف ثم وقف التعادل حتى <span class="num">${fmtP(D.entry + V.ext * (D.target - D.entry))}</span></dd>
+      ${p.D.target > D.target * 1.0001 ? `<dt>ركض للهدف الأصلي (قيد الاختبار)</dt><dd class="num">${fmtP(p.D.target)}</dd>` : ''}
       <dt>دخول عند تراجع (قيد الاختبار)</dt><dd class="num">${fmtP(D.entry - V.pullAtr * p.D.atr)}</dd>` : '';
   return `<article class="row" data-tier="${p.tier}" data-action="toggle" data-sym="${esc(p.sym)}" aria-expanded="${!!open}">
     <div class="top"><span class="sym">${esc(p.base)}<small>USDT</small></span><span class="tier">${TIER[p.tier]}</span></div>
@@ -856,7 +885,7 @@ function journalHTML() {
 
   html += `<h3>مقارنة الخطط على نفس الصفقات</h3>
   <table><thead><tr><th>الخطة</th><th>مغلقة</th><th>هدف</th><th>R متوسط</th></tr></thead><tbody>
-  ${['A', 'W', 'S', 'P'].map(k => { const s = planStats(k); return `<tr><td>${PLN[k]}${s.skipped ? `<div class="muted" style="font-size:11.5px">فائتة ${s.skipped}</div>` : ''}</td><td class="num">${s.n}</td><td class="num">${s.n ? s.win.toFixed(0) + '%' : '—'}</td><td class="num ${s.n ? (s.avgR > 0 ? 'win' : 'loss') : ''}">${s.n ? fmtR(s.avgR) : '—'}</td></tr>`; }).join('')}
+  ${['A', 'W', 'S', 'R', 'P'].map(k => { const s = planStats(k); return `<tr><td>${PLN[k]}${s.skipped ? `<div class="muted" style="font-size:11.5px">فائتة ${s.skipped}</div>` : ''}</td><td class="num">${s.n}</td><td class="num">${s.n ? s.win.toFixed(0) + '%' : '—'}</td><td class="num ${s.n ? (s.avgR > 0 ? 'win' : 'loss') : ''}">${s.n ? fmtR(s.avgR) : '—'}</td></tr>`; }).join('')}
   </tbody></table>
   <p class="help">R = النتيجة ÷ مسافة الوقف: الموجب يعني أن الخطة تربح بمخاطرة ثابتة. كل الخطط تُختبر على نفس الإشارات والشموع، وإذا لمست الشمعة الوقف والهدف معًا تُحسب خسارة.</p>`;
 
@@ -878,7 +907,7 @@ function journalHTML() {
 
   const st = [3, 2, 1, 0].map(tier => Object.assign({ tier }, planStats(vp, j => j.tier === tier)));
   html += `<h3>أداء كل فئة</h3>
-  <div class="seg">${['A', 'W', 'S', 'P'].map(k => `<button class="btn ${vp === k ? 'on' : ''}" data-action="vp" data-plan="${k}">${PLN[k]}</button>`).join('')}</div>
+  <div class="seg">${['A', 'W', 'S', 'R', 'P'].map(k => `<button class="btn ${vp === k ? 'on' : ''}" data-action="vp" data-plan="${k}">${PLN[k]}</button>`).join('')}</div>
   <table><thead><tr><th>الفئة</th><th>مغلقة</th><th>أصابت الهدف</th><th>R متوسط</th></tr></thead><tbody>
   ${st.map(s => `<tr><td>${TIER[s.tier]}<div class="meter"><i style="width:${Math.min(100, s.n / target * 100)}%"></i></div></td>
     <td class="num">${s.n}/${target}</td>
@@ -895,6 +924,8 @@ function journalHTML() {
   html += doneJ.length ? doneJ.map(j => `<div class="jrow"><span><b class="num">${esc(j.sym.replace('USDT', ''))}</b> ${TIER[j.tier]}</span><span class="${j.status === 'win' ? 'win' : j.status === 'loss' ? 'loss' : 'exp'}">${j.status === 'win' ? 'هدف' : j.status === 'loss' ? 'وقف' : 'انتهت المدة'} <span class="num">${fmtPct(j.result)}</span> <span class="muted num">${j.days.toFixed(1)}ي</span></span></div>`).join('') : `<p class="help">لا توجد نتائج بعد. تُقيَّم الصفقات المفتوحة مع كل مسح.</p>`;
   html += `<h3>نسخة احتياطية</h3>
     <button class="btn" data-action="export">نسخ السجل</button>
+    <button class="btn" data-action="exportCandles" ${S.bf || S.running ? 'disabled' : ''}>جلب الشموع للتحليل</button>
+    ${S.exportText ? `<button class="btn" data-action="copyText">نسخ النص</button>` : ''}
     <button class="btn" data-action="showImport">استيراد</button>
     ${S.exportText ? `<textarea readonly>${esc(S.exportText)}</textarea><p class="help">إذا لم يُنسخ تلقائيًا، حدّد النص وانسخه يدويًا. الصقه في محادثة Claude لتحليل الأداء ومعايرة العتبات.</p>` : ''}
     ${S.showImport ? `<textarea id="importBox" placeholder="الصق نسخة السجل هنا"></textarea><button class="btn" data-action="doImport">دمج في السجل</button>` : ''}
@@ -945,7 +976,7 @@ function settingsHTML() {
       <p>B: الحجم ≥ ×${CFG.B.vol}، عدد الصفقات يتبعه بنسبة ${CFG.B.follow * 100}%، حجم الصفقة ≤ ×${CFG.B.size}. اشتباه ضخ فوق ×${CFG.B.suspect}.</p>
       <p>D v1: هدف ≥ ${CFG.D.minTarget}%، عائد/مخاطرة ≥ ${CFG.D.minRR}، وقف ≤ ${CFG.D.maxStop}%.</p>
       <p>D v2: وقف = الأوسع بين آخر قاع و${V.stopAtr}×ATR وبحد أقصى ${V.maxStop}%، هدف = أقرب مقاومة بحد أقصى ${V.reachAtr}×ATR، هدف ≥ ${V.minTarget}%، عائد/مخاطرة ≥ ${V.minRR}.</p>
-      <p>الخطط التجريبية: جني ${50}% عند الهدف ثم وقف التعادل حتى ×${V.ext} من مسافة الهدف. دخول بأمر limit عند ${V.pullAtr}×ATR تحت السعر لمدة ${V.pullTTLh} ساعة.</p>
+      <p>الخطط التجريبية: جني ${50}% عند الهدف ثم وقف التعادل، والباقي يركض حتى ×${V.ext} من مسافة الهدف (S) أو حتى الهدف الأصلي (R). دخول بأمر limit عند ${V.pullAtr}×ATR تحت السعر لمدة ${V.pullTTLh} ساعة.</p>
       <p>الفلاتر: حجم ≥ $5M (أو $1.5M مع دخول حجم صحي ×${CFG.B.surge})، صعود يومي ≤ ${CFG.chaseMax}%، فارق سعري ≤ ${CFG.spreadMax}%، عمر ≥ ${CFG.minDays} يومًا.</p>
       <p>قيد المراقبة: أعلى ${CFG.near.max} تقييمًا بلا حد أدنى. مدة الصفقة في السجل ${CFG.journal.horizonDays} أيام.</p>
       <p>هذه قيم ابتدائية. تُعدَّل بعد تحليل السجل فقط.</p></details>`;
@@ -980,6 +1011,13 @@ function onClick(e) {
   else if (act === 'toggle') { if (e.target.closest('a')) return; S.open[a.dataset.sym] = !S.open[a.dataset.sym]; render(); }
   else if (act === 'vp') { S.vp = a.dataset.plan; render(); }
   else if (act === 'backfill') backfill();
+  else if (act === 'exportCandles') exportCandles();
+  else if (act === 'copyText') {
+    const done = ok => { S.msg = ok ? 'نُسخ النص. الصقه الآن في المحادثة.' : 'تعذر النسخ التلقائي. اضغط داخل المربع، حدّد الكل، ثم انسخ.'; render(); };
+    const ta = document.querySelector('textarea[readonly]');
+    if (navigator.clipboard && S.exportText) navigator.clipboard.writeText(S.exportText).then(() => done(true)).catch(() => done(false));
+    else done(false);
+  }
   else if (act === 'saveSettings') {
     const rk = parseFloat(document.getElementById('rkBox').value);
     S.settings = {
