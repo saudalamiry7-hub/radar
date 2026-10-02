@@ -146,7 +146,7 @@ const CFG = {
   // الاستراتيجية القديمة (v1): تبقى متاحة من الإعدادات
   D: { stLen: 10, stMult: 3, atrLen: 14, swing: 12, minTarget: 5, minRR: 2, maxStop: 12, pivot: 3, look: 180 },
   // الاستراتيجية الجديدة (v2): وقف خارج ضجيج السوق، وهدف في مدى الحركة الفعلي
-  V2: { stopAtr: 2, maxStop: 14, reachAtr: 2, minTarget: 4, minRR: 0.4, ext: 1.8, pullAtr: 0.6, pullTTLh: 12 },
+  V2: { stopAtr: 2, maxStop: 14, reachAtr: 2, minTarget: 4, minRR: 0.4, ext: 1.8, pullAtr: 1.0, pullTTLh: 24 },
   regime: { attack: 55, defense: 35 },
   journal: { horizonDays: 7, maxEval: 40, sample: 40 },
   near: { max: 3 },
@@ -160,7 +160,7 @@ const MODE = {
   selective: { word: 'انتقائي', cap: 2, note: 'السوق مختلط. أعلى فئة معروضة: جيد جدًا.' },
   defense:   { word: 'دفاع',    cap: 1, note: 'السيولة تنسحب. أعلى فئة معروضة: جيد، وبحجم أصغر.' },
 };
-const PLN = { A: 'الأصلية', W: 'وقف واسع', S: 'واسع + جني جزئي', R: 'جني جزئي + ركض للهدف الأصلي', P: 'واسع + دخول عند تراجع' };
+const PLN = { A: 'الأصلية', W: 'وقف واسع', S: 'واسع + جني جزئي', R: 'جني جزئي + ركض للهدف الأصلي', P: 'واسع + دخول limit (−1 ATR)' };
 
 /* ===================== التخزين ===================== */
 const store = {
@@ -811,11 +811,17 @@ function pickHTML(p) {
   const D = ap(p);
   const sig = (k, on, title) => `<span class="sig ${on ? 'on' : ''}" title="${title}">${k}</span>`;
   const rk = +S.settings.riskUsd || 0;
+  const V2c = CFG.V2;
+  const lim = (profile() === 'v2' && p.V && p.D.atr > 0) ? D.entry - V2c.pullAtr * p.D.atr : null;
+  const L = lim && lim > D.stop ? { entry: lim, stopPct: (lim - D.stop) / lim * 100, targetPct: (D.target / lim - 1) * 100 } : null;
+  if (L) L.rr = L.stopPct > 0 ? L.targetPct / L.stopPct : 0;
   const flags = [];
   if (p.low) flags.push(`<span class="flag gold">سيولة استثنائية</span>`);
   if (p.B.suspect) flags.push(`<span class="flag warn">اشتباه ضخ</span>`);
   if (D.sky) flags.push(`<span class="flag">قمة جديدة: الهدف مبني على ATR</span>`);
-  if (rk > 0 && D.stopPct > 0 && p.tier > 0) flags.push(`<span class="flag gold">حجم المركز <span class="num">$${Math.round(rk / (D.stopPct / 100))}</span> لمخاطرة <span class="num">$${rk}</span></span>`);
+  const sp = L ? L.stopPct : D.stopPct;
+  if (rk > 0 && sp > 0 && p.tier > 0) flags.push(`<span class="flag gold">حجم المركز <span class="num">$${Math.round(rk / (sp / 100))}</span> لمخاطرة <span class="num">$${rk}</span></span>`);
+  if (L && p.tier > 0) flags.push(`<span class="flag">أمر limit صالح ${V2c.pullTTLh} ساعة، ألغِه إن بلغ السعر الهدف قبل التنفيذ</span>`);
   if (p.gaps) p.gaps.forEach(g => flags.push(`<span class="flag gap">لم تجتز: ${esc(g)}</span>`));
   if (p.capped) flags.push(`<span class="flag">خُفّضت بسبب وضع السوق (${TIER[p.raw]})</span>`);
   const V = CFG.V2;
@@ -824,15 +830,15 @@ function pickHTML(p) {
       <dt>ATR 4H</dt><dd class="num">${p.D.atrPct.toFixed(2)}%</dd>
       <dt>جني جزئي (قيد الاختبار)</dt><dd>50% عند الهدف ثم وقف التعادل حتى <span class="num">${fmtP(D.entry + V.ext * (D.target - D.entry))}</span></dd>
       ${p.D.target > D.target * 1.0001 ? `<dt>ركض للهدف الأصلي (قيد الاختبار)</dt><dd class="num">${fmtP(p.D.target)}</dd>` : ''}
-      <dt>دخول عند تراجع (قيد الاختبار)</dt><dd class="num">${fmtP(D.entry - V.pullAtr * p.D.atr)}</dd>` : '';
+      <dt>الدخول الفوري بالسعر الحالي (للمقارنة)</dt><dd class="num">${fmtP(D.entry)}</dd>` : '';
   return `<article class="row" data-tier="${p.tier}" data-action="toggle" data-sym="${esc(p.sym)}" aria-expanded="${!!open}">
     <div class="top"><span class="sym">${esc(p.base)}<small>USDT</small></span><span class="tier">${TIER[p.tier]}</span></div>
     <div class="sigs">${sig('A', p.A.pass, 'طلب عدواني')}${sig('B', p.B.pass, 'مشاركة موزعة')}${sig('C', p.C.pass, 'قوة أمام BTC')}${sig('D', p.tier > 0, 'صفقة صالحة')}</div>
     <div class="levels">
-      <span>دخول<b class="num">${fmtP(D.entry)}</b></span>
-      <span>وقف<b class="num neg">${fmtPct(-D.stopPct)}</b></span>
-      <span>هدف<b class="num pos">${fmtPct(D.targetPct)}</b></span>
-      <span>عائد:مخاطرة<b class="num">${D.rr.toFixed(1)}</b></span>
+      <span>${L ? 'أمر limit' : 'دخول'}<b class="num">${fmtP(L ? L.entry : D.entry)}</b></span>
+      <span>وقف<b class="num neg">${fmtPct(-(L ? L.stopPct : D.stopPct))}</b></span>
+      <span>هدف<b class="num pos">${fmtPct(L ? L.targetPct : D.targetPct)}</b></span>
+      <span>عائد:مخاطرة<b class="num">${(L ? L.rr : D.rr).toFixed(1)}</b></span>
     </div>
     ${flags.length ? `<div class="flags">${flags.join('')}</div>` : ''}
     ${open ? `<div class="detail"><dl>
@@ -869,7 +875,7 @@ function picksHTML() {
     <p><b>B</b> مشاركة موزعة: الحجم وعدد الصفقات يرتفعان معًا، بلا صفقات ضخمة مشبوهة.</p>
     <p><b>C</b> قوة أمام BTC: تتفوق على البيتكوين خلال 3 و7 أيام.</p>
     <p><b>D</b> صفقة صالحة: ${profile() === 'v2'
-      ? `Supertrend 4H إيجابي، ووقف لا يقل عن ${V.stopAtr}×ATR، وهدف واقعي (أقرب مقاومة بحد أقصى ${V.reachAtr}×ATR) لا يقل عن ${V.minTarget}%، وعائد/مخاطرة ${V.minRR} أو أكثر. الحجم يُحسب بمخاطرة ثابتة.`
+      ? `Supertrend 4H إيجابي، ووقف لا يقل عن ${V.stopAtr}×ATR، وهدف واقعي (أقرب مقاومة بحد أقصى ${V.reachAtr}×ATR) لا يقل عن ${V.minTarget}%، وعائد/مخاطرة ${V.minRR} أو أكثر. الدخول بأمر limit عند ${V.pullAtr}×ATR تحت السعر الحالي (صالح ${V.pullTTLh} ساعة)، والحجم يُحسب بمخاطرة ثابتة.`
       : `Supertrend 4H إيجابي، هدف 5% أو أكثر قبل المقاومة، وعائد/مخاطرة 2 أو أكثر.`} شرط إلزامي لكل ما يظهر.</p>
     <p>ممتاز = D مع A وB وC. جيد جدًا = D مع اثنتين. جيد = D مع واحدة.</p>
     <p>قيد المراقبة = أعلى 3 تقييمًا من العملات التي لم تجتز الشروط، مع ما ينقص كل واحدة. ليست جاهزة للدخول. تُسجَّل في السجل كفئة مستقلة.</p></details>`;
@@ -976,7 +982,7 @@ function settingsHTML() {
       <p>B: الحجم ≥ ×${CFG.B.vol}، عدد الصفقات يتبعه بنسبة ${CFG.B.follow * 100}%، حجم الصفقة ≤ ×${CFG.B.size}. اشتباه ضخ فوق ×${CFG.B.suspect}.</p>
       <p>D v1: هدف ≥ ${CFG.D.minTarget}%، عائد/مخاطرة ≥ ${CFG.D.minRR}، وقف ≤ ${CFG.D.maxStop}%.</p>
       <p>D v2: وقف = الأوسع بين آخر قاع و${V.stopAtr}×ATR وبحد أقصى ${V.maxStop}%، هدف = أقرب مقاومة بحد أقصى ${V.reachAtr}×ATR، هدف ≥ ${V.minTarget}%، عائد/مخاطرة ≥ ${V.minRR}.</p>
-      <p>الخطط التجريبية: جني ${50}% عند الهدف ثم وقف التعادل، والباقي يركض حتى ×${V.ext} من مسافة الهدف (S) أو حتى الهدف الأصلي (R). دخول بأمر limit عند ${V.pullAtr}×ATR تحت السعر لمدة ${V.pullTTLh} ساعة.</p>
+      <p>الخطط التجريبية: جني ${50}% عند الهدف ثم وقف التعادل، والباقي يركض حتى ×${V.ext} من مسافة الهدف (S) أو حتى الهدف الأصلي (R). دخول بأمر limit عند ${V.pullAtr}×ATR تحت السعر لمدة ${V.pullTTLh} ساعة (هو الدخول المعتمد في v2).</p>
       <p>الفلاتر: حجم ≥ $5M (أو $1.5M مع دخول حجم صحي ×${CFG.B.surge})، صعود يومي ≤ ${CFG.chaseMax}%، فارق سعري ≤ ${CFG.spreadMax}%، عمر ≥ ${CFG.minDays} يومًا.</p>
       <p>قيد المراقبة: أعلى ${CFG.near.max} تقييمًا بلا حد أدنى. مدة الصفقة في السجل ${CFG.journal.horizonDays} أيام.</p>
       <p>هذه قيم ابتدائية. تُعدَّل بعد تحليل السجل فقط.</p></details>`;
