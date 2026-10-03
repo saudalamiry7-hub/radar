@@ -495,6 +495,8 @@ async function scan() {
     });
     const breadth = counted ? above / counted * 100 : 0;
     const regime = regimeOf(btcD, breadth);
+    { const bc = btcD.map(k => k.c), bl = bc.length - 1;
+      regime.ctx = { br: +breadth.toFixed ? +breadth.toFixed(1) : breadth, b1: bl >= 1 ? +((bc[bl] / bc[bl - 1] - 1) * 100).toFixed(2) : null, b7: bl >= 7 ? +((bc[bl] / bc[bl - 7] - 1) * 100).toFixed(2) : null, up: regime.btcUp ? 1 : 0, fall: regime.btcFalling ? 1 : 0 }; }
 
     setProgress('تحليل الفرص', 0.42);
     const jobs = [];
@@ -519,7 +521,7 @@ async function scan() {
 
     setProgress('تحديث السجل', 0.9);
     await evaluateJournal();
-    addToJournal(picks.concat(near), regime.mode);
+    addToJournal(picks.concat(near), regime.mode, regime.ctx);
 
     S.last = { t: Date.now(), regime, picks, near, excluded, universe: universe.length, analyzed: survivors.length, weight: S.weight, requests: S.requests, base: S.base };
     store.set('last', S.last);
@@ -550,7 +552,7 @@ function buildPlans(a, atr) {
   if (a.t > Wp.t * 1.0001) out.R = { e: Wp.e, s: Wp.s, t: Wp.t, t2: a.t };
   return out;
 }
-function addToJournal(picks, mode) {
+function addToJournal(picks, mode, ctx) {
   const openSyms = new Set(S.journal.filter(j => j.status === 'open').map(j => j.sym));
   const t = Date.now();
   for (const p of picks) {
@@ -558,7 +560,7 @@ function addToJournal(picks, mode) {
     const j = {
       id: p.sym + '-' + t, sym: p.sym, tier: p.tier, mode, t,
       entry: p.D.entry, stop: p.D.stop, target: p.D.target, status: 'open',
-      f: { atrPct: p.D.atrPct, ratio: p.A.ratio, move: p.A.move, volR: p.B.volR, trR: p.B.trR, sizeR: p.B.sizeR, rel3: p.C.rel3, rel7: p.C.rel7, chg: p.chg, qv: p.qv, spread: p.spread, sky: p.D.sky, sigs: (p.A.pass ? 'A' : '') + (p.B.pass ? 'B' : '') + (p.C.pass ? 'C' : '') },
+      f: { atrPct: p.D.atrPct, ratio: p.A.ratio, move: p.A.move, volR: p.B.volR, trR: p.B.trR, sizeR: p.B.sizeR, rel3: p.C.rel3, rel7: p.C.rel7, chg: p.chg, qv: p.qv, spread: p.spread, sky: p.D.sky, sigs: (p.A.pass ? 'A' : '') + (p.B.pass ? 'B' : '') + (p.C.pass ? 'C' : ''), mk: ctx || null },
     };
     j.pl = buildPlans({ e: j.entry, s: j.stop, t: j.target }, p.D.atr);
     S.journal.push(j);
