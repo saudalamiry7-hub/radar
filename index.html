@@ -79,6 +79,9 @@ button,input,textarea,select{font:inherit;color:inherit}
 .flags{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
 .flag{font-size:12px;padding:2px 8px;border-radius:6px;background:var(--panel);color:var(--mist)}
 .flag.warn{color:var(--coral)} .flag.gold{color:var(--brass)}
+.risk{font-size:13px;font-weight:600;margin-top:4px}
+.risk span{font-weight:400;color:var(--mist)}
+.risk[data-lv="low"]{color:var(--sage)} .risk[data-lv="mid"]{color:var(--brass)} .risk[data-lv="high"]{color:var(--coral)}
 .detail{margin-top:10px;padding-top:10px;border-top:1px dashed var(--line);font-size:13px;color:var(--mist)}
 .detail dl{display:grid;grid-template-columns:1fr auto;gap:4px 12px}
 .detail dd{color:var(--sand);text-align:left}
@@ -143,10 +146,14 @@ const CFG = {
   chaseMax: 15, spreadMax: 0.15, minDays: 30,
   A: { hours: 48, ratio: 0.53, minMove: 0, maxMove: 8 },
   B: { vol: 1.3, surge: 2.0, follow: 0.8, size: 2, suspect: 3 },
-  // الاستراتيجية القديمة (v1): تبقى متاحة من الإعدادات
+  // بوابة v1 تُحسب فقط لتكون أساس الوقف والهدف الأصليين في السجل
   D: { stLen: 10, stMult: 3, atrLen: 14, swing: 12, minTarget: 5, minRR: 2, maxStop: 12, pivot: 3, look: 180 },
-  // الاستراتيجية الجديدة (v2): وقف خارج ضجيج السوق، وهدف في مدى الحركة الفعلي
-  V2: { stopAtr: 2, maxStop: 14, reachAtr: 2, minTarget: 4, minRR: 0.4, ext: 1.8, pullAtr: 1.0, pullTTLh: 24 },
+  // v2: وقف خارج ضجيج السوق، وهدف في مدى الحركة الفعلي
+  V2: { stopAtr: 2, maxStop: 14, reachAtr: 2, minTarget: 4, minRR: 0.4, trailAtr: 2, pullAtr: 1.0, pullTTLh: 24 },
+  // ملاحظة الخطورة: نقاط من حالة السوق وجودة الإشارة. 0–1 منخفضة، 2 متوسطة، 3+ عالية
+  RISK: { btcDay: -3, btc4h: -1.5, breadth: 50, wideStop: 12, mid: 2, high: 3 },
+  // ترتيب القوة النسبية بين كل العملات (يُسجَّل للاختبار ولا يدخل في التصنيف بعد)
+  RS: { d1: 7, d2: 14 },
   regime: { attack: 55, defense: 35 },
   journal: { horizonDays: 7, maxEval: 40, sample: 40 },
   near: { max: 3 },
@@ -160,7 +167,7 @@ const MODE = {
   selective: { word: 'انتقائي', cap: 2, note: 'السوق مختلط. أعلى فئة معروضة: جيد جدًا.' },
   defense:   { word: 'دفاع',    cap: 1, note: 'السيولة تنسحب. أعلى فئة معروضة: جيد، وبحجم أصغر.' },
 };
-const PLN = { A: 'الأصلية', W: 'وقف واسع', S: 'واسع + جني جزئي', R: 'جني جزئي + ركض للهدف الأصلي', P: 'واسع + دخول limit (−1 ATR)' };
+const PLN = { A: 'الأصلية', W: 'وقف واسع (v2)', P: 'v2 + دخول limit (−1 ATR)', T: 'v2 + نصف عند الهدف والنصف يركض' };
 
 /* ===================== التخزين ===================== */
 const store = {
@@ -175,15 +182,18 @@ const S = {
   vp: 'W', bf: null, bfMsg: null,
 };
 function loadState() {
-  S.settings = Object.assign({ exclude: DEFAULT_EXCLUDE, proxy: '', profile: 'v2', riskUsd: 10 }, store.get('settings', {}));
+  S.settings = Object.assign({ exclude: DEFAULT_EXCLUDE, proxy: '', riskUsd: 10 }, store.get('settings', {}));
   S.last = store.get('last', null);
   S.journal = store.get('journal', []);
+  for (const j of S.journal) {
+    if (j.pl) { delete j.pl.S; delete j.pl.R; }
+    if (j.alt) { delete j.alt.S; delete j.alt.R; }
+  }
   S.cooldownUntil = store.get('cooldown', 0);
   S.haltUntil = store.get('halt', 0);
 }
-const profile = () => (S.settings && S.settings.profile === 'v1') ? 'v1' : 'v2';
-const ap = r => (profile() === 'v2' && r.V) ? r.V : r.D;
-const thr = () => profile() === 'v2' ? CFG.V2 : CFG.D;
+const ap = r => r.V || r.D;
+const thr = () => CFG.V2;
 
 /* ===================== أدوات ===================== */
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -332,9 +342,9 @@ function grade(r, mode) {
   const D = ap(r);
   if (!D.pass) return { tier: 0, reason: D.why };
   if (r.low && !(r.B.pass && r.B.surge)) return { tier: 0, reason: 'سيولة ضعيفة بلا دخول حجم صحي' };
-  const n = (r.A.pass ? 1 : 0) + (r.B.pass ? 1 : 0) + (r.C.pass ? 1 : 0);
+  const n = (r.B.pass ? 1 : 0) + (r.C.pass ? 1 : 0);
   if (n === 0) return { tier: 0, reason: 'صفقة بلا إشارات داعمة' };
-  let tier = n === 3 ? 3 : n === 2 ? 2 : 1;
+  let tier = n === 2 ? (r.A.pass ? 3 : 2) : 1;
   if (r.B.suspect) tier = Math.min(tier, 1);
   const raw = tier;
   tier = Math.min(tier, MODE[mode].cap);
@@ -344,7 +354,7 @@ function grade(r, mode) {
 /* قيد المراقبة: أعلى 3 تقييمًا من العملات التي لم تجتز الشروط، بلا أي حد أدنى. */
 function nearMiss(r) {
   const D = ap(r), T = thr();
-  const n = (r.A.pass ? 1 : 0) + (r.B.pass ? 1 : 0) + (r.C.pass ? 1 : 0);
+  const n = (r.B.pass ? 1 : 0) + (r.C.pass ? 1 : 0) + (r.A.pass ? 0.5 : 0);
   let score = n + (D.stGreen ? 1 : 0)
     + Math.min(Math.max(D.targetPct, 0) / T.minTarget, 1)
     + Math.min(Math.max(D.rr, 0) / T.minRR, 1)
@@ -360,6 +370,29 @@ function nearMiss(r) {
   if (n === 0) gaps.push('لا إشارات داعمة');
   if (weak) gaps.push('سيولة ضعيفة');
   return { tier: 0, n, score, gaps };
+}
+
+/* ملاحظة الخطورة: لا تقرر عنك، تعطيك الصورة. تُسجَّل لتُختبر بالشموع. */
+function riskOf(r, regime) {
+  const R = CFG.RISK, x = regime.ctx || {}, why = [];
+  let pts = 0;
+  if (!regime.btcUp || (x.b1 != null && x.b1 <= R.btcDay) || regime.breadth < R.breadth) { pts += 2; why.push('السوق ضعيف'); }
+  if (x.h4 != null && x.h4 <= R.btc4h) { pts += 1; why.push('BTC يهبط الآن'); }
+  if (!r.tier || r.tier === 1) { pts += 1; why.push(r.tier ? 'إشارة واحدة' : 'لم تجتز الشروط'); }
+  if (r.B.suspect || r.low) { pts += 1; why.push(r.B.suspect ? 'اشتباه ضخ' : 'سيولة استثنائية'); }
+  if (ap(r).stopPct > R.wideStop) { pts += 1; why.push('وقف واسع'); }
+  const lv = pts >= R.high ? 'high' : pts >= R.mid ? 'mid' : 'low';
+  return { lv, pts, why };
+}
+const RISK_W = { low: 'منخفضة', mid: 'متوسطة', high: 'عالية' };
+/* ترتيب القوة النسبية: نسبة العملات التي تتفوق عليها هذه العملة خلال 7 و14 يومًا (100 = الأقوى). */
+function rsRanks(rows) {
+  const ret = (c, n) => c.length > n ? c[c.length - 1] / c[c.length - 1 - n] - 1 : null;
+  const v = rows.map(x => ({ sym: x.sym, a: ret(x.c, CFG.RS.d1), b: ret(x.c, CFG.RS.d2) })).filter(x => x.a != null && x.b != null);
+  const pct = (arr, k) => { const s = arr.map(x => x[k]).sort((p, q) => p - q); return val => s.length > 1 ? s.filter(y => y < val).length / (s.length - 1) * 100 : 50; };
+  const pa = pct(v, 'a'), pb = pct(v, 'b'), out = {};
+  for (const x of v) out[x.sym] = Math.round((pa(x.a) + pb(x.b)) / 2);
+  return out;
 }
 
 function regimeOf(btcD, breadth) {
@@ -448,12 +481,13 @@ async function scan() {
     await ensureBase();
 
     setProgress('قراءة السوق كاملًا', 0.06);
-    const [tick, book, btcRaw] = await Promise.all([
+    const [tick, book, btcRaw, btcH] = await Promise.all([
       api('/api/v3/ticker/24hr', W.ticker),
       api('/api/v3/ticker/bookTicker', W.book),
       kl('BTCUSDT', '1d', 120),
+      kl('BTCUSDT', '1h', 8).catch(() => []),
     ]);
-    const btcD = closedK(btcRaw);
+    const btcD = closedK(btcRaw), btcHc = closedK(btcH).map(k => k.c);
     const bookMap = new Map(book.map(b => [b.symbol, b]));
     const userEx = new Set((S.settings.exclude || '').toUpperCase().split(/[\s,،]+/).filter(Boolean));
     const now = Date.now();
@@ -494,9 +528,12 @@ async function scan() {
       survivors.push({ u, d1: dc });
     });
     const breadth = counted ? above / counted * 100 : 0;
+    const rs = rsRanks(universe.map((u, i) => ({ sym: u.sym, c: daily[i] && !daily[i].err ? closedK(daily[i]).map(k => k.c) : [] })));
     const regime = regimeOf(btcD, breadth);
     { const bc = btcD.map(k => k.c), bl = bc.length - 1;
-      regime.ctx = { br: +breadth.toFixed ? +breadth.toFixed(1) : breadth, b1: bl >= 1 ? +((bc[bl] / bc[bl - 1] - 1) * 100).toFixed(2) : null, b7: bl >= 7 ? +((bc[bl] / bc[bl - 7] - 1) * 100).toFixed(2) : null, up: regime.btcUp ? 1 : 0, fall: regime.btcFalling ? 1 : 0 }; }
+      regime.ctx = { br: +breadth.toFixed ? +breadth.toFixed(1) : breadth, b1: bl >= 1 ? +((bc[bl] / bc[bl - 1] - 1) * 100).toFixed(2) : null, b7: bl >= 7 ? +((bc[bl] / bc[bl - 7] - 1) * 100).toFixed(2) : null, up: regime.btcUp ? 1 : 0, fall: regime.btcFalling ? 1 : 0,
+      h1: btcHc.length >= 2 ? +((btcHc[btcHc.length - 1] / btcHc[btcHc.length - 2] - 1) * 100).toFixed(2) : null,
+      h4: btcHc.length >= 5 ? +((btcHc[btcHc.length - 1] / btcHc[btcHc.length - 5] - 1) * 100).toFixed(2) : null }; }
 
     setProgress('تحليل الفرص', 0.42);
     const jobs = [];
@@ -518,6 +555,7 @@ async function scan() {
     picks.sort((x, y) => y.tier - x.tier || ap(y).rr - ap(x).rr);
     near.sort((x, y) => y.score - x.score || ap(y).rr - ap(x).rr);
     near.splice(CFG.near.max);
+    for (const r of picks.concat(near)) { r.rs = rs[r.sym] != null ? rs[r.sym] : null; r.risk = riskOf(r, regime); }
 
     setProgress('تحديث السجل', 0.9);
     await evaluateJournal();
@@ -538,19 +576,17 @@ async function scan() {
 }
 
 /* ===================== السجل الظلي: عدة خطط على نفس الإشارة ===================== */
-/* A = الخطة الأصلية (الحقول المسطحة). W = وقف واسع. S = وقف واسع + جني جزئي. P = وقف واسع + دخول عند تراجع. */
+/* A = الأصلية (الحقول المسطحة). W = وقف واسع. P = وقف واسع + دخول limit. T = وقف واسع + نصف عند الهدف والنصف يركض بوقف متحرك. */
 function buildPlans(a, atr) {
   const V = CFG.V2;
   if (!(atr > 0)) return {};
   const Wp = { e: a.e, s: Math.min(a.s, a.e - V.stopAtr * atr), t: Math.min(a.t, a.e + V.reachAtr * atr) };
   if (!(Wp.t > Wp.e) || !(Wp.s < Wp.e)) return {};
-  const out = {
+  return {
     W: Wp,
-    S: { e: Wp.e, s: Wp.s, t: Wp.t },
     P: { e: a.e - V.pullAtr * atr, s: Wp.s, t: Wp.t, ttl: V.pullTTLh * 36e5 },
+    T: { e: Wp.e, s: Wp.s, t: Wp.t, atr },
   };
-  if (a.t > Wp.t * 1.0001) out.R = { e: Wp.e, s: Wp.s, t: Wp.t, t2: a.t };
-  return out;
 }
 function addToJournal(picks, mode, ctx) {
   const openSyms = new Set(S.journal.filter(j => j.status === 'open').map(j => j.sym));
@@ -560,7 +596,8 @@ function addToJournal(picks, mode, ctx) {
     const j = {
       id: p.sym + '-' + t, sym: p.sym, tier: p.tier, mode, t,
       entry: p.D.entry, stop: p.D.stop, target: p.D.target, status: 'open',
-      f: { atrPct: p.D.atrPct, ratio: p.A.ratio, move: p.A.move, volR: p.B.volR, trR: p.B.trR, sizeR: p.B.sizeR, rel3: p.C.rel3, rel7: p.C.rel7, chg: p.chg, qv: p.qv, spread: p.spread, sky: p.D.sky, sigs: (p.A.pass ? 'A' : '') + (p.B.pass ? 'B' : '') + (p.C.pass ? 'C' : ''), mk: ctx || null },
+      f: { atrPct: p.D.atrPct, ratio: p.A.ratio, move: p.A.move, volR: p.B.volR, trR: p.B.trR, sizeR: p.B.sizeR, rel3: p.C.rel3, rel7: p.C.rel7, chg: p.chg, qv: p.qv, spread: p.spread, sky: p.D.sky, sigs: (p.A.pass ? 'A' : '') + (p.B.pass ? 'B' : '') + (p.C.pass ? 'C' : ''), mk: ctx || null, rs: p.rs },
+      rk: p.risk ? { lv: p.risk.lv, pts: p.risk.pts } : null,
     };
     j.pl = buildPlans({ e: j.entry, s: j.stop, t: j.target }, p.D.atr);
     S.journal.push(j);
@@ -580,9 +617,9 @@ function simStd(p, cs, t0, expired) {
   if (expired && cs.length) { const k = cs[cs.length - 1]; return mk('expired', k.c, k.ct, p, t0); }
   return { status: 'open' };
 }
-/* جني 50% عند الهدف، ثم الوقف إلى سعر الدخول، والنصف الباقي يخرج عند تعادل أو عند ext × مسافة الهدف. */
-function simScale(p, cs, t0, expired) {
-  const risk = (p.e - p.s) / p.e * 100;
+/* نصف الصفقة يخرج عند الهدف. النصف الباقي بلا سقف: الوقف يبدأ عند الدخول ثم يلحق أعلى سعر بمسافة trailAtr×ATR ولا ينزل. */
+function simTrail(p, cs, t0, expired) {
+  const risk = (p.e - p.s) / p.e * 100, tr = CFG.V2.trailAtr * p.atr;
   let hit = -1;
   for (let i = 0; i < cs.length; i++) {
     const k = cs[i];
@@ -594,14 +631,14 @@ function simScale(p, cs, t0, expired) {
     return { status: 'open' };
   }
   const t1 = (p.t / p.e - 1) * 100;
-  const t2 = p.t2 > p.t ? p.t2 : p.e + CFG.V2.ext * (p.t - p.e);
-  const fin = (rest, when) => ({ status: 'win', exit: null, closeT: when, result: 0.5 * t1 + 0.5 * rest, risk, days: (when - t0) / 864e5 });
+  const fin = (px, when) => ({ status: 'win', exit: null, closeT: when, result: 0.5 * t1 + 0.5 * (px / p.e - 1) * 100, risk, days: (when - t0) / 864e5 });
+  let hh = cs[hit].h, stop = Math.max(p.e, hh - tr);
   for (let i = hit + 1; i < cs.length; i++) {
     const k = cs[i];
-    if (k.l <= p.e) return fin(0, k.ct);
-    if (k.h >= t2) return fin((t2 / p.e - 1) * 100, k.ct);
+    if (k.l <= stop) return fin(stop, k.ct);
+    if (k.h > hh) { hh = k.h; stop = Math.max(stop, hh - tr); }
   }
-  if (expired && cs.length) { const k = cs[cs.length - 1]; return fin((k.c / p.e - 1) * 100, k.ct); }
+  if (expired && cs.length) { const k = cs[cs.length - 1]; return fin(k.c, k.ct); }
   return { status: 'open' };
 }
 /* أمر limit عند تراجع، صالح مدة محددة. يُلغى إذا وصل الهدف قبل التنفيذ. */
@@ -644,11 +681,11 @@ function runSim(j, ks, now) {
   }
   if (j.pl) {
     j.alt = j.alt || {};
-    if (j.pl.W && !j.pl.R && j.target > j.pl.W.t * 1.0001) j.pl.R = { e: j.pl.W.e, s: j.pl.W.s, t: j.pl.W.t, t2: j.target };
-    for (const key of ['W', 'S', 'R', 'P']) {
+    if (j.pl.W && !j.pl.T && j.f && j.f.atrPct > 0) j.pl.T = { e: j.pl.W.e, s: j.pl.W.s, t: j.pl.W.t, atr: j.entry * j.f.atrPct / 100 };
+    for (const key of ['W', 'P', 'T']) {
       const p = j.pl[key], cur = j.alt[key];
       if (!p || (cur && cur.status !== 'open' && cur.status !== 'pending')) continue;
-      j.alt[key] = (key === 'S' || key === 'R') ? simScale(p, cs, j.t, expired) : key === 'P' ? simPull(p, cs, j.t, now, expired) : simStd(p, cs, j.t, expired);
+      j.alt[key] = key === 'T' ? simTrail(p, cs, j.t, expired) : key === 'P' ? simPull(p, cs, j.t, now, expired) : simStd(p, cs, j.t, expired);
     }
   }
   excursions(j, cs);
@@ -658,7 +695,7 @@ function needsEval(j) {
   const hz = CFG.journal.horizonDays * 864e5;
   if (j.status === 'open') return true;
   if (j.pl && !j.alt) return true;
-  if (j.pl && j.pl.W && !j.pl.R && j.target > j.pl.W.t * 1.0001) return true;
+  if (j.pl && j.pl.W && !j.pl.T && j.f && j.f.atrPct > 0) return true;
   if (j.alt && Object.values(j.alt).some(a => a.status === 'open' || a.status === 'pending')) return true;
   if (j.status === 'loss' && j.rec === undefined && j.pl) return true;
   if (j.status === 'loss' && j.rec === undefined && Date.now() - j.t < hz) return true;
@@ -780,7 +817,6 @@ function regimeHTML() {
     <div class="facts">
       <span>اتساع السوق <b class="num">${b.toFixed(0)}%</b></span>
       <span>BTC <b>${R.btcUp ? 'فوق' : 'تحت'}</b> متوسط 50 يومًا${!R.btcUp && R.btcFalling ? ' وهابط' : ''}</span>
-      <span>الاستراتيجية <b class="num">${profile()}</b></span>
     </div>
   </section>`;
 }
@@ -808,39 +844,46 @@ function scanAreaHTML() {
     ${S.storageErr ? `<div class="alert">المتصفح يمنع الحفظ. السجل لن يُحفظ بين الجلسات؛ شغّل الصفحة من أيقونة الشاشة الرئيسية.</div>` : ''}`;
 }
 
+/* الدخول المعتمد: أمر limit تحت السعر. إن لم يصلح (الوقف أعلى منه) يبقى الدخول الفوري. */
+function entryPlan(p) {
+  const D = ap(p), V = CFG.V2;
+  const lim = p.D && p.D.atr > 0 ? D.entry - V.pullAtr * p.D.atr : null;
+  if (lim && lim > D.stop) return { entry: lim, limit: true, stopPct: (lim - D.stop) / lim * 100, targetPct: (D.target / lim - 1) * 100 };
+  return { entry: D.entry, limit: false, stopPct: D.stopPct, targetPct: D.targetPct };
+}
 function pickHTML(p) {
   const open = S.open[p.sym];
   const D = ap(p);
   const sig = (k, on, title) => `<span class="sig ${on ? 'on' : ''}" title="${title}">${k}</span>`;
   const rk = +S.settings.riskUsd || 0;
   const V2c = CFG.V2;
-  const lim = (profile() === 'v2' && p.V && p.D.atr > 0) ? D.entry - V2c.pullAtr * p.D.atr : null;
-  const L = lim && lim > D.stop ? { entry: lim, stopPct: (lim - D.stop) / lim * 100, targetPct: (D.target / lim - 1) * 100 } : null;
-  if (L) L.rr = L.stopPct > 0 ? L.targetPct / L.stopPct : 0;
+  const L = entryPlan(p);
+  L.rr = L.stopPct > 0 ? L.targetPct / L.stopPct : 0;
   const flags = [];
   if (p.low) flags.push(`<span class="flag gold">سيولة استثنائية</span>`);
   if (p.B.suspect) flags.push(`<span class="flag warn">اشتباه ضخ</span>`);
   if (D.sky) flags.push(`<span class="flag">قمة جديدة: الهدف مبني على ATR</span>`);
-  const sp = L ? L.stopPct : D.stopPct;
-  if (rk > 0 && sp > 0 && p.tier > 0) flags.push(`<span class="flag gold">حجم المركز <span class="num">$${Math.round(rk / (sp / 100))}</span> لمخاطرة <span class="num">$${rk}</span></span>`);
-  if (L && p.tier > 0) flags.push(`<span class="flag">أمر limit صالح ${V2c.pullTTLh} ساعة، ألغِه إن بلغ السعر الهدف قبل التنفيذ</span>`);
+  const sp = L.stopPct;
+  if (rk > 0 && sp > 0 && p.tier > 0) flags.push(`<span class="flag">للاسترشاد: حجم <span class="num">$${Math.round(rk / (sp / 100))}</span> يخسر <span class="num">$${rk}</span> عند الوقف</span>`);
+  if (p.rs != null) flags.push(`<span class="flag ${p.rs >= 80 ? 'gold' : ''}">قوة نسبية: أقوى من <span class="num">${p.rs}%</span> من السوق</span>`);
+  if (L.limit && p.tier > 0) flags.push(`<span class="flag">أمر limit صالح ${V2c.pullTTLh} ساعة، ألغِه إن بلغ السعر الهدف قبل التنفيذ</span>`);
   if (p.gaps) p.gaps.forEach(g => flags.push(`<span class="flag gap">لم تجتز: ${esc(g)}</span>`));
   if (p.capped) flags.push(`<span class="flag">خُفّضت بسبب وضع السوق (${TIER[p.raw]})</span>`);
   const V = CFG.V2;
   const alt = p.V && p.D.atr > 0 ? `
       <dt>الخطة الأصلية (وقف / هدف)</dt><dd class="num">${fmtPct(-p.D.stopPct)} / ${fmtPct(p.D.targetPct)}</dd>
       <dt>ATR 4H</dt><dd class="num">${p.D.atrPct.toFixed(2)}%</dd>
-      <dt>جني جزئي (قيد الاختبار)</dt><dd>50% عند الهدف ثم وقف التعادل حتى <span class="num">${fmtP(D.entry + V.ext * (D.target - D.entry))}</span></dd>
-      ${p.D.target > D.target * 1.0001 ? `<dt>ركض للهدف الأصلي (قيد الاختبار)</dt><dd class="num">${fmtP(p.D.target)}</dd>` : ''}
+      <dt>خروج متحرك (قيد الاختبار)</dt><dd>50% عند الهدف، والباقي بوقف يلحق أعلى سعر بمسافة ${V.trailAtr}×ATR (<span class="num">${fmtP(p.D.atr * V.trailAtr)}</span>)</dd>
       <dt>الدخول الفوري بالسعر الحالي (للمقارنة)</dt><dd class="num">${fmtP(D.entry)}</dd>` : '';
   return `<article class="row" data-tier="${p.tier}" data-action="toggle" data-sym="${esc(p.sym)}" aria-expanded="${!!open}">
     <div class="top"><span class="sym">${esc(p.base)}<small>USDT</small></span><span class="tier">${TIER[p.tier]}</span></div>
+    ${p.risk ? `<div class="risk" data-lv="${p.risk.lv}">خطورة ${RISK_W[p.risk.lv]}${p.risk.why.length ? ` <span>· ${esc(p.risk.why.join('، '))}</span>` : ''}</div>` : ''}
     <div class="sigs">${sig('A', p.A.pass, 'طلب عدواني')}${sig('B', p.B.pass, 'مشاركة موزعة')}${sig('C', p.C.pass, 'قوة أمام BTC')}${sig('D', p.tier > 0, 'صفقة صالحة')}</div>
     <div class="levels">
-      <span>${L ? 'أمر limit' : 'دخول'}<b class="num">${fmtP(L ? L.entry : D.entry)}</b></span>
-      <span>وقف<b class="num neg">${fmtPct(-(L ? L.stopPct : D.stopPct))}</b></span>
-      <span>هدف<b class="num pos">${fmtPct(L ? L.targetPct : D.targetPct)}</b></span>
-      <span>عائد:مخاطرة<b class="num">${(L ? L.rr : D.rr).toFixed(1)}</b></span>
+      <span>${L.limit ? 'أمر limit' : 'دخول'}<b class="num">${fmtP(L.entry)}</b></span>
+      <span>وقف<b class="num neg">${fmtPct(-L.stopPct)}</b></span>
+      <span>هدف<b class="num pos">${fmtPct(L.targetPct)}</b></span>
+      <span>عائد:مخاطرة<b class="num">${L.rr.toFixed(1)}</b></span>
     </div>
     ${flags.length ? `<div class="flags">${flags.join('')}</div>` : ''}
     ${open ? `<div class="detail"><dl>
@@ -873,13 +916,13 @@ function picksHTML() {
   if (ex.length) html += `<details class="excl"><summary>لماذا استُبعدت البقية (<span class="num">${sum(ex, e => e[1])}</span>)</summary><ul>${ex.map(([k, v]) => `<li><span>${esc(k)}</span><span class="num">${v}</span></li>`).join('')}</ul></details>`;
   const V = CFG.V2;
   html += `<details class="legend"><summary>معنى الرموز</summary>
-    <p><b>A</b> طلب عدواني: المشترون يدفعون السعر بهدوء، ولم يتمدد بعد.</p>
+    <p><b>A</b> طلب عدواني: المشترون يدفعون السعر بهدوء ولم يتمدد بعد. ترفع جيد جدًا إلى ممتاز فقط.</p>
     <p><b>B</b> مشاركة موزعة: الحجم وعدد الصفقات يرتفعان معًا، بلا صفقات ضخمة مشبوهة.</p>
     <p><b>C</b> قوة أمام BTC: تتفوق على البيتكوين خلال 3 و7 أيام.</p>
-    <p><b>D</b> صفقة صالحة: ${profile() === 'v2'
-      ? `Supertrend 4H إيجابي، ووقف لا يقل عن ${V.stopAtr}×ATR، وهدف واقعي (أقرب مقاومة بحد أقصى ${V.reachAtr}×ATR) لا يقل عن ${V.minTarget}%، وعائد/مخاطرة ${V.minRR} أو أكثر. الدخول بأمر limit عند ${V.pullAtr}×ATR تحت السعر الحالي (صالح ${V.pullTTLh} ساعة)، والحجم يُحسب بمخاطرة ثابتة.`
-      : `Supertrend 4H إيجابي، هدف 5% أو أكثر قبل المقاومة، وعائد/مخاطرة 2 أو أكثر.`} شرط إلزامي لكل ما يظهر.</p>
-    <p>ممتاز = D مع A وB وC. جيد جدًا = D مع اثنتين. جيد = D مع واحدة.</p>
+    <p><b>D</b> صفقة صالحة: Supertrend 4H إيجابي، ووقف لا يقل عن ${V.stopAtr}×ATR، وهدف واقعي (أقرب مقاومة بحد أقصى ${V.reachAtr}×ATR) لا يقل عن ${V.minTarget}%، وعائد/مخاطرة ${V.minRR} أو أكثر. الدخول بأمر limit عند ${V.pullAtr}×ATR تحت السعر الحالي (صالح ${V.pullTTLh} ساعة)، شرط إلزامي لكل ما يظهر.</p>
+    <p>جيد جدًا = D مع B وC. ممتاز = جيد جدًا مع A. جيد = D مع B أو C فقط. A وحدها لا تكفي للترشيح.</p>
+    <p>الخطورة: السوق ضعيف (+2)، BTC يهبط الآن (+1)، إشارة واحدة أو لم تجتز الشروط (+1)، اشتباه ضخ أو سيولة استثنائية (+1)، وقف أوسع من ${CFG.RISK.wideStop}% (+1). منخفضة 0–1، متوسطة 2، عالية 3 فأكثر. القرار والحجم لك.</p>
+    <p>القوة النسبية: نسبة العملات التي تتفوق عليها خلال 7 و14 يومًا. تُسجَّل للاختبار ولا تدخل في التصنيف بعد.</p>
     <p>قيد المراقبة = أعلى 3 تقييمًا من العملات التي لم تجتز الشروط، مع ما ينقص كل واحدة. ليست جاهزة للدخول. تُسجَّل في السجل كفئة مستقلة.</p></details>`;
   return html;
 }
@@ -893,7 +936,7 @@ function journalHTML() {
 
   html += `<h3>مقارنة الخطط على نفس الصفقات</h3>
   <table><thead><tr><th>الخطة</th><th>مغلقة</th><th>هدف</th><th>R متوسط</th></tr></thead><tbody>
-  ${['A', 'W', 'S', 'R', 'P'].map(k => { const s = planStats(k); return `<tr><td>${PLN[k]}${s.skipped ? `<div class="muted" style="font-size:11.5px">فائتة ${s.skipped}</div>` : ''}</td><td class="num">${s.n}</td><td class="num">${s.n ? s.win.toFixed(0) + '%' : '—'}</td><td class="num ${s.n ? (s.avgR > 0 ? 'win' : 'loss') : ''}">${s.n ? fmtR(s.avgR) : '—'}</td></tr>`; }).join('')}
+  ${['A', 'W', 'P', 'T'].map(k => { const s = planStats(k); return `<tr><td>${PLN[k]}${s.skipped ? `<div class="muted" style="font-size:11.5px">فائتة ${s.skipped}</div>` : ''}</td><td class="num">${s.n}</td><td class="num">${s.n ? s.win.toFixed(0) + '%' : '—'}</td><td class="num ${s.n ? (s.avgR > 0 ? 'win' : 'loss') : ''}">${s.n ? fmtR(s.avgR) : '—'}</td></tr>`; }).join('')}
   </tbody></table>
   <p class="help">R = النتيجة ÷ مسافة الوقف: الموجب يعني أن الخطة تربح بمخاطرة ثابتة. كل الخطط تُختبر على نفس الإشارات والشموع، وإذا لمست الشمعة الوقف والهدف معًا تُحسب خسارة.</p>`;
 
@@ -913,9 +956,18 @@ function journalHTML() {
   html += `<h3>الأداء حسب مسافة الوقف (الخطة الأصلية)</h3>
     <table><thead><tr><th>المسافة</th><th>مغلقة</th><th>هدف</th><th>متوسط</th></tr></thead><tbody>${b1.map(brow).join('')}${withAtr.length ? b2.map(brow).join('') : ''}</tbody></table>`;
 
+  const lvRows = ['low', 'mid', 'high'].map(lv => Object.assign({ lv }, planStats(vp, j => j.rk && j.rk.lv === lv)));
+  const rsRows = [[80, 101, 'أقوى 20%'], [50, 80, 'الوسط الأعلى'], [0, 50, 'النصف الأضعف']].map(([a, b, lb]) => Object.assign({ lb }, planStats(vp, j => j.f && j.f.rs != null && j.f.rs >= a && j.f.rs < b)));
+  const sRow = (lb, s) => `<tr><td>${lb}</td><td class="num">${s.n}</td><td class="num">${s.n ? s.win.toFixed(0) + '%' : '—'}</td><td class="num">${s.n ? fmtR(s.avgR) : '—'}</td></tr>`;
+  html += `<h3>هل ملاحظة الخطورة صادقة؟ (${PLN[vp]})</h3>
+    <table><thead><tr><th>الخطورة</th><th>مغلقة</th><th>هدف</th><th>R متوسط</th></tr></thead><tbody>${lvRows.map(s => sRow(RISK_W[s.lv], s)).join('')}</tbody></table>
+    <h3>هل القوة النسبية تتنبأ؟ (${PLN[vp]})</h3>
+    <table><thead><tr><th>الترتيب</th><th>مغلقة</th><th>هدف</th><th>R متوسط</th></tr></thead><tbody>${rsRows.map(s => sRow(s.lb, s)).join('')}</tbody></table>
+    <p class="help">تبدأ بالامتلاء مع الصفقات الجديدة. إذا لم تخسر "عالية" أكثر من "منخفضة" بعد 40 صفقة، نعيد ضبط النقاط.</p>`;
+
   const st = [3, 2, 1, 0].map(tier => Object.assign({ tier }, planStats(vp, j => j.tier === tier)));
   html += `<h3>أداء كل فئة</h3>
-  <div class="seg">${['A', 'W', 'S', 'R', 'P'].map(k => `<button class="btn ${vp === k ? 'on' : ''}" data-action="vp" data-plan="${k}">${PLN[k]}</button>`).join('')}</div>
+  <div class="seg">${['A', 'W', 'P', 'T'].map(k => `<button class="btn ${vp === k ? 'on' : ''}" data-action="vp" data-plan="${k}">${PLN[k]}</button>`).join('')}</div>
   <table><thead><tr><th>الفئة</th><th>مغلقة</th><th>أصابت الهدف</th><th>R متوسط</th></tr></thead><tbody>
   ${st.map(s => `<tr><td>${TIER[s.tier]}<div class="meter"><i style="width:${Math.min(100, s.n / target * 100)}%"></i></div></td>
     <td class="num">${s.n}/${target}</td>
@@ -955,15 +1007,9 @@ const WORKER = `export default {
 
 function settingsHTML() {
   const s = S.settings, V = CFG.V2;
-  return `<label for="pfBox">الاستراتيجية</label>
-    <select id="pfBox">
-      <option value="v2" ${profile() === 'v2' ? 'selected' : ''}>v2: وقف خارج الضجيج وهدف واقعي (الافتراضية)</option>
-      <option value="v1" ${profile() === 'v1' ? 'selected' : ''}>v1: الأصلية (عائد/مخاطرة 2 فأكثر)</option>
-    </select>
-    <p class="help">السجل يختبر الخطتين معًا بغض النظر عن اختيارك، فلن تضيع المقارنة.</p>
-    <label for="rkBox">مخاطرة الصفقة بالدولار</label>
+  return `<label for="rkBox">مخاطرة الصفقة بالدولار</label>
     <input id="rkBox" type="text" inputmode="decimal" value="${esc(s.riskUsd)}">
-    <p class="help">يُحسب حجم المركز = المخاطرة ÷ مسافة الوقف، فتخسر المبلغ نفسه في كل وقف مهما اتسع.</p>
+    <p class="help">للاسترشاد فقط: يعرض على كل بطاقة الحجم الذي يخسر هذا المبلغ عند الوقف. القرار لك.</p>
     <label for="exBox">عملات مستبعدة دائمًا (ميم أو أي عملة لا تثق بها)</label>
     <textarea id="exBox">${esc(s.exclude)}</textarea>
     <p class="help">اكتب رمز العملة فقط، وافصل بفاصلة. العملات المستقرة وBTC مستبعدة تلقائيًا.</p>
@@ -982,9 +1028,9 @@ function settingsHTML() {
     <details class="legend"><summary>العتبات الحالية</summary>
       <p>A: شراء taker ≥ ${CFG.A.ratio * 100}% خلال ${CFG.A.hours} ساعة، وحركة بين ${CFG.A.minMove}% و${CFG.A.maxMove}%.</p>
       <p>B: الحجم ≥ ×${CFG.B.vol}، عدد الصفقات يتبعه بنسبة ${CFG.B.follow * 100}%، حجم الصفقة ≤ ×${CFG.B.size}. اشتباه ضخ فوق ×${CFG.B.suspect}.</p>
-      <p>D v1: هدف ≥ ${CFG.D.minTarget}%، عائد/مخاطرة ≥ ${CFG.D.minRR}، وقف ≤ ${CFG.D.maxStop}%.</p>
-      <p>D v2: وقف = الأوسع بين آخر قاع و${V.stopAtr}×ATR وبحد أقصى ${V.maxStop}%، هدف = أقرب مقاومة بحد أقصى ${V.reachAtr}×ATR، هدف ≥ ${V.minTarget}%، عائد/مخاطرة ≥ ${V.minRR}.</p>
-      <p>الخطط التجريبية: جني ${50}% عند الهدف ثم وقف التعادل، والباقي يركض حتى ×${V.ext} من مسافة الهدف (S) أو حتى الهدف الأصلي (R). دخول بأمر limit عند ${V.pullAtr}×ATR تحت السعر لمدة ${V.pullTTLh} ساعة (هو الدخول المعتمد في v2).</p>
+      <p>D: وقف = الأوسع بين آخر قاع و${V.stopAtr}×ATR وبحد أقصى ${V.maxStop}%، هدف = أقرب مقاومة بحد أقصى ${V.reachAtr}×ATR، هدف ≥ ${V.minTarget}%، عائد/مخاطرة ≥ ${V.minRR}.</p>
+      <p>الدخول: أمر limit عند ${V.pullAtr}×ATR تحت السعر لمدة ${V.pullTTLh} ساعة. الخروج المتحرك قيد الاختبار في السجل: 50% عند الهدف والباقي بوقف يلحق أعلى سعر بمسافة ${V.trailAtr}×ATR.</p>
+      <p>الخطورة: BTC تحت متوسط 50 يومًا أو 24 ساعة ≤ ${CFG.RISK.btcDay}% أو اتساع أقل من ${CFG.RISK.breadth}% (+2)، BTC أربع ساعات ≤ ${CFG.RISK.btc4h}% (+1)، وقف أوسع من ${CFG.RISK.wideStop}% (+1).</p>
       <p>الفلاتر: حجم ≥ $5M (أو $1.5M مع دخول حجم صحي ×${CFG.B.surge})، صعود يومي ≤ ${CFG.chaseMax}%، فارق سعري ≤ ${CFG.spreadMax}%، عمر ≥ ${CFG.minDays} يومًا.</p>
       <p>قيد المراقبة: أعلى ${CFG.near.max} تقييمًا بلا حد أدنى. مدة الصفقة في السجل ${CFG.journal.horizonDays} أيام.</p>
       <p>هذه قيم ابتدائية. تُعدَّل بعد تحليل السجل فقط.</p></details>`;
@@ -1031,7 +1077,6 @@ function onClick(e) {
     S.settings = {
       exclude: document.getElementById('exBox').value,
       proxy: document.getElementById('pxBox').value.trim(),
-      profile: document.getElementById('pfBox').value === 'v1' ? 'v1' : 'v2',
       riskUsd: isFinite(rk) && rk > 0 ? rk : 10,
     };
     S.base = null; store.set('settings', S.settings); S.msg = 'حُفظت الإعدادات. تُطبَّق في المسح القادم.'; render();
@@ -1066,7 +1111,7 @@ if (typeof document !== 'undefined' && document.getElementById) {
   render();
   setInterval(() => { if (!S.running && (Date.now() < S.cooldownUntil + 1500 || Date.now() < S.haltUntil + 1500)) renderScanArea(); }, 1000);
 }
-if (typeof module !== 'undefined') module.exports = { analyze, grade, regimeOf, supertrend, atrSeries, ema, resistances, parseK, closedK, buildPlans, simStd, simScale, simPull, runSim, planStats, diag, CFG, S };
+if (typeof module !== 'undefined') module.exports = { analyze, grade, regimeOf, supertrend, atrSeries, ema, resistances, parseK, closedK, buildPlans, simStd, simTrail, simPull, runSim, planStats, diag, riskOf, rsRanks, entryPlan, CFG, S };
 </script>
 </body>
 </html>
