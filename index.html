@@ -69,6 +69,7 @@ button,input,textarea,select{font:inherit;color:inherit}
 .row[data-tier="1"] .tier{color:var(--steel)}
 .row[data-tier="0"]{border-style:dashed;opacity:.9}
 .row[data-tier="0"] .tier{color:var(--mist)}
+details.group>summary{cursor:pointer;margin-bottom:6px}
 .flag.gap{color:var(--sand);border:1px dashed var(--mist);background:transparent}
 .sigs{display:flex;gap:6px;margin:8px 0 10px;direction:ltr;justify-content:flex-end}
 .sig{width:28px;height:28px;border-radius:8px;display:grid;place-items:center;font-size:13px;font-weight:700;border:1.5px solid var(--line);color:var(--mist)}
@@ -138,30 +139,26 @@ pre{white-space:pre-wrap;direction:ltr;text-align:left;background:var(--deep);bo
 <script>
 'use strict';
 
-/* ===================== الإعدادات الأساسية ===================== */
+/* ===================== الإعدادات ===================== */
 const CFG = {
   bases: ['https://data-api.binance.vision','https://api.binance.com','https://api1.binance.com','https://api2.binance.com','https://api3.binance.com','https://api4.binance.com'],
   conc: 6, timeoutMs: 12000, cooldownSec: 60, safeWeight: 3000,
   minVol: 5e6, minVolLow: 1.5e6, maxUniverse: 110,
   chaseMax: 15, spreadMax: 0.15, minDays: 30,
-  A: { hours: 48, ratio: 0.53, minMove: 0, maxMove: 8 },
-  B: { vol: 1.3, surge: 2.0, follow: 0.8, size: 2, suspect: 3 },
-  // بوابة v1 تُحسب فقط لتكون أساس الوقف والهدف الأصليين في السجل
-  D: { stLen: 10, stMult: 3, atrLen: 14, swing: 12, minTarget: 5, minRR: 2, maxStop: 12, pivot: 3, look: 180 },
-  // v2: وقف خارج ضجيج السوق، وهدف في مدى الحركة الفعلي
-  V2: { stopAtr: 2, maxStop: 14, reachAtr: 2, minTarget: 4, minRR: 0.4, pullAtr: 1.0, pullTTLh: 24, brkAtr: 1, actAtr: 1, trailAtr: 2 },
-  // v3 (ظل): قوة الدليل. هجوم = B مع C أو قمة جديدة، عادي = B وحدها، ضعيف = بلا B. الحكم بعد 30 مسحًا جديدًا منها 5 في سوق ضعيف
-  EV: { scans: 30, weak: 5, adopt: 0.2, drop: 0.05, top: 3 },
-  // قياس الأداء: الرسوم ذهابًا وإيابًا تُخصم من كل الخطط، وقواعد الحكم على الخطة H محددة مسبقًا
+  // B: مشاركة موزعة. آخر 24 ساعة مقابل متوسط الأيام الستة قبلها
+  B: { vol: 1.3, surge: 2.0, follow: 0.8, size: 2 },
+  // D: اتجاه 4H وهندسة الصفقة. الوقف = الأوسع بين آخر قاع و2 ATR، الهدف = أقرب مقاومة بحد أقصى 2 ATR
+  D: { stLen: 10, stMult: 3, atrLen: 14, swing: 12, pivot: 3, look: 180, stopAtr: 2, maxStop: 14, reachAtr: 2, minTarget: 4, minRR: 0.4, trailAtr: 2 },
   fee: 0.2,
-  TEST: { scans: 30, weak: 5, adopt: 0.15, drop: 0.05 },
-  // ملاحظة الخطورة: نقاط من حالة السوق وجودة الإشارة. 0–1 منخفضة، 2 متوسطة، 3+ عالية
   RISK: { btcDay: -3, btc4h: -1.5, breadth: 50, wideStop: 12, mid: 2, high: 3 },
-  // ترتيب القوة النسبية بين كل العملات (يُسجَّل للاختبار ولا يدخل في التصنيف بعد)
-  RS: { d1: 7, d2: 14 },
   regime: { attack: 55, defense: 35 },
-  journal: { horizonDays: 7, maxEval: 40, sample: 40 },
-  near: { max: 3 },
+  journal: { horizonDays: 7, maxEval: 60 },
+  // مجموعة ضابطة: عملات عشوائية بنفس هندسة الدخول، مرة كل 4 ساعات على الأكثر
+  ctrl: { n: 3, everyH: 4 },
+  // قاعدة الحكم (مسجلة مسبقًا): أيام مكتملة الأفق، وفترتان منفصلتان في سوق ضعيف
+  TEST: { days: 20, weakEp: 2, epGap: 7, adopt: 0.15, drop: 0.05 },
+  near: { show: 3 },
+  backupDays: 7,
 };
 const W = { ping: 1, ticker: 80, book: 4, klines: 2 };
 const NEVER = new Set(['BTC','USDC','FDUSD','TUSD','USDP','DAI','BUSD','EUR','AEUR','EURI','USD1','PYUSD','XUSD','RLUSD','USDE','USDS','BFUSD','UST','USTC','PAX','GBP','TRY','BRL','ARS','WBTC','WBETH','BETH','BNSOL','PAXG','XAUT']);
@@ -172,9 +169,8 @@ const MODE = {
   selective: { word: 'انتقائي', cap: 2, note: 'السوق مختلط. أعلى فئة معروضة: جيد جدًا.' },
   defense:   { word: 'دفاع',    cap: 1, note: 'السيولة تنسحب. أعلى فئة معروضة: جيد، وبحجم أصغر.' },
 };
-const PLN = { P: 'limit + هدف (المعتمد)', W: 'فوري + هدف', H: 'limit أو اختراق + وقف متحرك (اختبار)', S: 'فوري + نصف عند الهدف والباقي متحرك (اختبار)', A: 'مرجع v1' };
-const PLANS = ['P', 'W', 'H', 'S', 'A'];
-const EVW = { atk: 'هجوم', norm: 'عادي', weak: 'ضعيف' };
+/* مجموعات السجل. pick يظهر في البطاقات، st في قيد المراقبة، والبقية ظل للمقارنة فقط. */
+const GRP = { pick: 'المرشحون (B+C+D)', st: 'B+C بلا اتجاه 4H', one: 'إشارة واحدة + D', ctrl: 'عشوائية (ضابطة)' };
 
 /* ===================== التخزين ===================== */
 const store = {
@@ -185,31 +181,24 @@ const store = {
 const S = {
   tab: 'picks', running: false, progress: null, base: null, weight: 0, requests: 0,
   abort: null, error: null, open: {}, conn: null, exportText: null, msg: null,
-  settings: null, last: null, journal: [], cooldownUntil: 0, haltUntil: 0,
-  vp: 'P', bf: null, bfMsg: null,
+  settings: null, last: null, journal: [], cooldownUntil: 0, haltUntil: 0, bf: null, bfMsg: null, exportedAt: 0,
 };
 function loadState() {
   S.settings = Object.assign({ exclude: DEFAULT_EXCLUDE, proxy: '', riskUsd: 10 }, store.get('settings', {}));
   S.last = store.get('last', null);
+  if (S.last && S.last.v !== 4) S.last = null; // شكل المسح تغيّر في v4
   S.journal = store.get('journal', []);
-  for (const j of S.journal) {
-    if (!j.v3) {
-      if (j.pl) { delete j.pl.S; delete j.pl.R; delete j.pl.T; }
-      if (j.alt) { delete j.alt.S; delete j.alt.R; delete j.alt.T; }
-      j.v3 = 1;
-    }
-    if (j.f && j.f.sigs != null && !j.f.ev) j.f.ev = evFrom(j.f.sigs.includes('B'), j.f.sigs.includes('C'), j.f.sky);
-  }
   S.cooldownUntil = store.get('cooldown', 0);
   S.haltUntil = store.get('halt', 0);
+  S.exportedAt = store.get('exportedAt', 0);
 }
-const ap = r => r.V || r.D;
-const thr = () => CFG.V2;
 
 /* ===================== أدوات ===================== */
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const sum = (a, f) => a.reduce((s, x) => s + f(x), 0);
+const mean = a => a.length ? sum(a, x => x) / a.length : 0;
 const median = a => { if (!a.length) return 0; const s = [...a].sort((x, y) => x - y); const m = s.length >> 1; return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2; };
+const rp = (x, n = 4) => x == null || !isFinite(x) ? null : +x.toPrecision(n);
 const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 function fmtP(p) {
   if (!isFinite(p)) return '—';
@@ -229,6 +218,7 @@ function ago(t) {
   if (h < 48) return 'منذ ' + h + ' س';
   return 'منذ ' + Math.floor(h / 24) + ' يوم';
 }
+const dayOf = t => Math.floor((t + 4 * 36e5) / 864e5); // يوم بتوقيت الإمارات
 
 /* ===================== المؤشرات ===================== */
 const parseK = raw => raw.map(k => ({ t: k[0], o: +k[1], h: +k[2], l: +k[3], c: +k[4], ct: k[6], qv: +k[7], n: +k[8], tb: +k[10] }));
@@ -276,18 +266,15 @@ function resistances(ks, span) {
   return res;
 }
 
-/* ===================== الإشارات والتصنيف ===================== */
+/* ===================== الإشارات ===================== */
 function analyze(u, d1, h4, h1, btcD) {
   const r = { sym: u.sym, base: u.base, last: u.last, qv: u.qv, chg: u.chg, spread: u.spread, low: u.qv < CFG.minVol };
 
-  // A — طلب عدواني لم يتمدد بعد
-  const a = h1.slice(-CFG.A.hours);
-  const qvA = sum(a, k => k.qv), tbA = sum(a, k => k.tb);
-  const ratio = qvA ? tbA / qvA : 0;
-  const move = a.length ? (a[a.length - 1].c / a[0].o - 1) * 100 : 0;
-  r.A = { ratio, move, pass: a.length >= CFG.A.hours && ratio >= CFG.A.ratio && move >= CFG.A.minMove && move <= CFG.A.maxMove };
+  // وصفي فقط (لا يدخل في القرار): نسبة شراء الـ taker وحركة 48 ساعة
+  const a = h1.slice(-48), qvA = sum(a, k => k.qv);
+  r.A = { ratio: qvA ? sum(a, k => k.tb) / qvA : 0, move: a.length ? (a[a.length - 1].c / a[0].o - 1) * 100 : 0 };
 
-  // B — مشاركة موزعة (الحجم + عدد الصفقات + حجم الصفقة الواحدة)
+  // B — مشاركة موزعة: الحجم وعدد الصفقات يرتفعان معًا، بلا صفقات ضخمة
   if (h1.length >= 168) {
     const recent = h1.slice(-24), prior = h1.slice(-168, -24);
     const volNow = sum(recent, k => k.qv), trNow = sum(recent, k => k.n);
@@ -296,119 +283,66 @@ function analyze(u, d1, h4, h1, btcD) {
     const sizes = [];
     for (let d = 0; d < 6; d++) { const ch = prior.slice(d * 24, (d + 1) * 24); const n = sum(ch, k => k.n); if (n) sizes.push(sum(ch, k => k.qv) / n); }
     const sizeBase = median(sizes), sizeR = sizeBase && trNow ? (volNow / trNow) / sizeBase : 0;
-    r.B = {
-      volR, trR, sizeR,
-      pass: volR >= CFG.B.vol && trR >= CFG.B.follow * volR && sizeR <= CFG.B.size,
-      surge: volR >= CFG.B.surge,
-      suspect: volR >= 1.5 && sizeR > CFG.B.suspect,
-    };
-  } else r.B = { volR: 0, trR: 0, sizeR: 0, pass: false, surge: false, suspect: false };
+    r.B = { volR, trR, sizeR, pass: volR >= CFG.B.vol && trR >= CFG.B.follow * volR && sizeR <= CFG.B.size, surge: volR >= CFG.B.surge };
+  } else r.B = { volR: 0, trR: 0, sizeR: 0, pass: false, surge: false };
 
-  // C — قوة نسبية أمام BTC
+  // C — قوة نسبية أمام BTC خلال 3 و7 أيام
   const c = d1.map(k => k.c), b = btcD.map(k => k.c);
   const ret = (arr, n) => arr[arr.length - 1] / arr[arr.length - 1 - n] - 1;
   const rel3 = (ret(c, 3) - ret(b, 3)) * 100, rel7 = (ret(c, 7) - ret(b, 7)) * 100;
   r.C = { rel3, rel7, pass: rel3 > 0 && rel7 > 0 };
 
-  // D — صفقة صالحة (شرط إلزامي)
-  const k4 = h4.slice(-CFG.D.look);
-  const st = supertrend(k4, CFG.D.stLen, CFG.D.stMult);
+  // D — اتجاه 4H أخضر + صفقة بهندسة صالحة. الدخول بسعر ask الحالي
+  const D = CFG.D;
+  const k4 = h4.slice(-D.look);
+  const st = supertrend(k4, D.stLen, D.stMult);
   const stGreen = st[st.length - 1] === 1;
-  const atr = atrSeries(k4, CFG.D.atrLen)[k4.length - 1] || 0;
-  const entry = u.last;
-  const atrPct = entry ? atr / entry * 100 : 0;
-  const swingLow = Math.min(...k4.slice(-CFG.D.swing).map(k => k.l));
-  let stop = swingLow * 0.995;
-  if (entry - stop < atr) stop = entry - atr;
-  const stopPct = (entry - stop) / entry * 100;
-  const res = resistances(k4, CFG.D.pivot).filter(h => h > entry * 1.002);
+  const atr = atrSeries(k4, D.atrLen)[k4.length - 1] || 0;
+  const entry = u.ask > 0 ? u.ask : u.last;
+  const swingStop = Math.min(...k4.slice(-D.swing).map(k => k.l)) * 0.995;
+  const res = resistances(k4, D.pivot).filter(h => h > entry * 1.002);
   const sky = res.length === 0;
-  const target = sky ? entry + 3 * atr : Math.min(...res) * 0.995;
-  const targetPct = (target / entry - 1) * 100;
+  const stop = Math.min(swingStop, entry - D.stopAtr * atr);
+  const target = Math.min(sky ? Infinity : Math.min(...res) * 0.995, entry + D.reachAtr * atr);
+  const stopPct = (entry - stop) / entry * 100, targetPct = (target / entry - 1) * 100;
   const rr = entry > stop ? (target - entry) / (entry - stop) : 0;
-  let why = null;
-  if (!stGreen) why = 'Supertrend 4H سلبي';
-  else if (targetPct < CFG.D.minTarget) why = sky ? 'حركة ضيقة لا تكفي 5%' : 'مقاومة قبل 5%';
-  else if (stopPct > CFG.D.maxStop) why = 'الوقف واسع جدًا';
-  else if (rr < CFG.D.minRR) why = 'العائد/المخاطرة أقل من 2';
-  r.D = { pass: !why, why, stGreen, atr, atrPct, entry, stop, stopPct, target, targetPct, rr, sky };
-
-  // D2 — نفس الدخول، لكن الوقف خارج ضجيج 4H والهدف داخل مدى الحركة
-  const V = CFG.V2;
-  const vStop = Math.min(stop, entry - V.stopAtr * atr);
-  const vTarget = Math.min(target, entry + V.reachAtr * atr);
-  const vStopPct = (entry - vStop) / entry * 100;
-  const vTargetPct = (vTarget / entry - 1) * 100;
-  const vRR = entry > vStop ? (vTarget - entry) / (entry - vStop) : 0;
-  let vWhy = null;
-  if (!stGreen) vWhy = 'Supertrend 4H سلبي';
-  else if (vTargetPct < V.minTarget) vWhy = 'الهدف الواقعي أقل من ' + V.minTarget + '%';
-  else if (vStopPct > V.maxStop) vWhy = 'الوقف واسع جدًا';
-  else if (vRR < V.minRR) vWhy = 'العائد/المخاطرة أقل من ' + V.minRR;
-  r.V = { pass: !vWhy, why: vWhy, stGreen, atr, atrPct, entry, stop: vStop, stopPct: vStopPct, target: vTarget, targetPct: vTargetPct, rr: vRR, sky };
+  let geoWhy = null;
+  if (!(atr > 0) || !(stop > 0)) geoWhy = 'بيانات 4H غير كافية';
+  else if (targetPct < D.minTarget) geoWhy = 'الهدف الواقعي أقل من ' + D.minTarget + '%';
+  else if (stopPct > D.maxStop) geoWhy = 'الوقف أوسع من ' + D.maxStop + '%';
+  else if (rr < D.minRR) geoWhy = 'العائد/المخاطرة أقل من ' + D.minRR;
+  r.D = { geo: !geoWhy, geoWhy, stGreen, pass: !geoWhy && stGreen, atr, atrPct: entry ? atr / entry * 100 : 0, entry, stop, stopPct, target, targetPct, rr, sky };
   return r;
 }
 
+/* التصنيف: المرشح = B وC معًا مع D. في السجل كانت كل إشارة وحدها خاسرة، والاثنتان معًا الرابحة.
+   بوابة حالة السوق تبقى كما هي: سقف الفئة حسب الوضع. */
 function grade(r, mode) {
-  const D = ap(r);
-  if (!D.pass) return { tier: 0, reason: D.why };
-  if (r.low && !(r.B.pass && r.B.surge)) return { tier: 0, reason: 'سيولة ضعيفة بلا دخول حجم صحي' };
+  const tier = 2;
+  return { tier: Math.min(tier, MODE[mode].cap), raw: tier, capped: MODE[mode].cap < tier };
+}
+/* مجموعة كل عملة. null = مستبعدة مع السبب. */
+function groupOf(r) {
+  if (r.low && !r.B.surge) return { why: 'سيولة ضعيفة بلا دخول حجم صحي' };
+  if (!r.D.geo) return { why: r.D.geoWhy };
   const n = (r.B.pass ? 1 : 0) + (r.C.pass ? 1 : 0);
-  if (n === 0) return { tier: 0, reason: 'صفقة بلا إشارات داعمة' };
-  let tier = n === 2 ? (r.A.pass ? 3 : 2) : 1;
-  if (r.B.suspect) tier = Math.min(tier, 1);
-  const raw = tier;
-  tier = Math.min(tier, MODE[mode].cap);
-  return { tier, raw, capped: tier < raw };
+  if (n === 2) return { g: r.D.stGreen ? 'pick' : 'st', why: r.D.stGreen ? null : 'B+C لكن Supertrend 4H سلبي' };
+  if (n === 1 && r.D.stGreen) return { g: 'one', why: 'إشارة واحدة فقط (' + (r.B.pass ? 'B' : 'C') + ')' };
+  return { g: null, why: n ? 'إشارة واحدة واتجاه 4H سلبي' : 'لا B ولا C', pool: true };
 }
 
-/* قيد المراقبة: أعلى 3 تقييمًا من العملات التي لم تجتز الشروط، بلا أي حد أدنى. */
-function nearMiss(r) {
-  const D = ap(r), T = thr();
-  const n = (r.B.pass ? 1 : 0) + (r.C.pass ? 1 : 0) + (r.A.pass ? 0.5 : 0);
-  let score = n + (D.stGreen ? 1 : 0)
-    + Math.min(Math.max(D.targetPct, 0) / T.minTarget, 1)
-    + Math.min(Math.max(D.rr, 0) / T.minRR, 1)
-    + (D.stopPct <= T.maxStop ? 1 : T.maxStop / D.stopPct);
-  if (r.B.suspect) score -= 1;
-  const weak = r.low && !(r.B.pass && r.B.surge);
-  if (weak) score -= 1;
-  const gaps = [];
-  if (!D.stGreen) gaps.push('Supertrend 4H سلبي');
-  if (D.targetPct < T.minTarget) gaps.push((D.sky ? 'الهدف المتوقع ' : 'المقاومة على بعد ') + D.targetPct.toFixed(1) + '%');
-  if (D.stopPct > T.maxStop) gaps.push('الوقف ' + D.stopPct.toFixed(1) + '%');
-  if (D.rr < T.minRR) gaps.push('العائد/المخاطرة ' + D.rr.toFixed(1));
-  if (n === 0) gaps.push('لا إشارات داعمة');
-  if (weak) gaps.push('سيولة ضعيفة');
-  return { tier: 0, n, score, gaps };
-}
-
-/* ملاحظة الخطورة: لا تقرر عنك، تعطيك الصورة. تُسجَّل لتُختبر بالشموع. */
+/* ملاحظة الخطورة: صورة لا قرار. */
 function riskOf(r, regime) {
   const R = CFG.RISK, x = regime.ctx || {}, why = [];
   let pts = 0;
   if (!regime.btcUp || (x.b1 != null && x.b1 <= R.btcDay) || regime.breadth < R.breadth) { pts += 2; why.push('السوق ضعيف'); }
   if (x.h4 != null && x.h4 <= R.btc4h) { pts += 1; why.push('BTC يهبط الآن'); }
-  if (!r.tier || r.tier === 1) { pts += 1; why.push(r.tier ? 'إشارة واحدة' : 'لم تجتز الشروط'); }
-  if (r.B.suspect || r.low) { pts += 1; why.push(r.B.suspect ? 'اشتباه ضخ' : 'سيولة استثنائية'); }
-  if (ap(r).stopPct > R.wideStop) { pts += 1; why.push('وقف واسع'); }
+  if (r.low) { pts += 1; why.push('سيولة استثنائية'); }
+  if (r.D.stopPct > R.wideStop) { pts += 1; why.push('وقف واسع'); }
   const lv = pts >= R.high ? 'high' : pts >= R.mid ? 'mid' : 'low';
   return { lv, pts, why };
 }
 const RISK_W = { low: 'منخفضة', mid: 'متوسطة', high: 'عالية' };
-/* قوة الدليل (v3، ظل): B هي الإشارة الأقوى في السجل، والقمة الجديدة (sky) تدعمها. لا تغيّر الفئة ولا الدخول، تُسجَّل وتُختبر. */
-function evFrom(b, c, sky) { return b ? (c || sky ? 'atk' : 'norm') : 'weak'; }
-const evOf = r => evFrom(r.B.pass, r.C.pass, ap(r).sky);
-const EV_RANK = { atk: 2, norm: 1, weak: 0 };
-/* ترتيب القوة النسبية: نسبة العملات التي تتفوق عليها هذه العملة خلال 7 و14 يومًا (100 = الأقوى). */
-function rsRanks(rows) {
-  const ret = (c, n) => c.length > n ? c[c.length - 1] / c[c.length - 1 - n] - 1 : null;
-  const v = rows.map(x => ({ sym: x.sym, a: ret(x.c, CFG.RS.d1), b: ret(x.c, CFG.RS.d2) })).filter(x => x.a != null && x.b != null);
-  const pct = (arr, k) => { const s = arr.map(x => x[k]).sort((p, q) => p - q); return val => s.length > 1 ? s.filter(y => y < val).length / (s.length - 1) * 100 : 50; };
-  const pa = pct(v, 'a'), pb = pct(v, 'b'), out = {};
-  for (const x of v) out[x.sym] = Math.round((pa(x.a) + pb(x.b)) / 2);
-  return out;
-}
 
 function regimeOf(btcD, breadth) {
   const c = btcD.map(k => k.c), e = ema(c, 50);
@@ -518,7 +452,7 @@ async function scan() {
       const bk = bookMap.get(t.symbol);
       const bid = bk ? +bk.bidPrice : 0, ask = bk ? +bk.askPrice : 0;
       const spread = bid > 0 && ask > 0 ? (ask - bid) / ((ask + bid) / 2) * 100 : 99;
-      universe.push({ sym: t.symbol, base, qv, last, chg: open > 0 ? (last / open - 1) * 100 : 0, spread });
+      universe.push({ sym: t.symbol, base, qv, last, ask, chg: open > 0 ? (last / open - 1) * 100 : 0, spread });
     }
     universe.sort((x, y) => y.qv - x.qv);
     universe.splice(CFG.maxUniverse);
@@ -543,10 +477,9 @@ async function scan() {
       survivors.push({ u, d1: dc });
     });
     const breadth = counted ? above / counted * 100 : 0;
-    const rs = rsRanks(universe.map((u, i) => ({ sym: u.sym, c: daily[i] && !daily[i].err ? closedK(daily[i]).map(k => k.c) : [] })));
     const regime = regimeOf(btcD, breadth);
     { const bc = btcD.map(k => k.c), bl = bc.length - 1;
-      regime.ctx = { br: +breadth.toFixed ? +breadth.toFixed(1) : breadth, b1: bl >= 1 ? +((bc[bl] / bc[bl - 1] - 1) * 100).toFixed(2) : null, b7: bl >= 7 ? +((bc[bl] / bc[bl - 7] - 1) * 100).toFixed(2) : null, up: regime.btcUp ? 1 : 0, fall: regime.btcFalling ? 1 : 0,
+      regime.ctx = { br: +breadth.toFixed(1), b1: bl >= 1 ? +((bc[bl] / bc[bl - 1] - 1) * 100).toFixed(2) : null, b7: bl >= 7 ? +((bc[bl] / bc[bl - 7] - 1) * 100).toFixed(2) : null, up: regime.btcUp ? 1 : 0, fall: regime.btcFalling ? 1 : 0,
       h1: btcHc.length >= 2 ? +((btcHc[btcHc.length - 1] / btcHc[btcHc.length - 2] - 1) * 100).toFixed(2) : null,
       h4: btcHc.length >= 5 ? +((btcHc[btcHc.length - 1] / btcHc[btcHc.length - 5] - 1) * 100).toFixed(2) : null }; }
 
@@ -556,29 +489,36 @@ async function scan() {
     const got = await pool(jobs, CFG.conc, j => kl(survivors[j.i].u.sym, j.iv, 200),
       (d, n) => setProgress('تحليل الفرص', 0.42 + 0.45 * d / n));
 
-    const picks = [], near = [];
+    const rows = [];
     survivors.forEach((s, i) => {
       const h4 = got[i * 2], h1 = got[i * 2 + 1];
       if (!h4 || h4.err || !h1 || h1.err) { ex('تعذر جلب بياناتها'); return; }
       const c4 = closedK(h4), c1 = closedK(h1);
       if (c4.length < 60 || c1.length < 60) { ex('بيانات غير كافية'); return; }
-      const r = analyze(s.u, s.d1, c4, c1, btcD);
-      const g = grade(r, regime.mode);
-      if (!g.tier) { ex(g.reason); near.push(Object.assign(r, nearMiss(r))); return; }
-      picks.push(Object.assign(r, g));
+      rows.push(analyze(s.u, s.d1, c4, c1, btcD));
     });
-    picks.sort((x, y) => y.tier - x.tier || ap(y).rr - ap(x).rr);
-    near.sort((x, y) => y.score - x.score || ap(y).rr - ap(x).rr);
-    near.splice(CFG.near.max);
-    for (const r of picks.concat(near)) { r.rs = rs[r.sym] != null ? rs[r.sym] : null; r.risk = riskOf(r, regime); r.ev = evOf(r); }
-    // أفضل N في المسح: قوة الدليل أولًا، ثم القوة النسبية. صفقات المسح الواحد تتحرك معًا.
-    picks.concat(near).filter(r => r.ev !== 'weak').sort((x, y) => EV_RANK[y.ev] - EV_RANK[x.ev] || (y.rs || 0) - (x.rs || 0)).slice(0, CFG.EV.top).forEach(r => { r.top = true; });
+    // الحجم مقارنة بوسيط السوق في نفس المسح: يفرّق بين سيولة تخص العملة وموجة عامة (وصفي)
+    const medVol = median(rows.map(r => r.B.volR).filter(v => v > 0)) || 1;
+    const picks = [], near = [], one = [], poolC = [];
+    for (const r of rows) {
+      r.B.vx = r.B.volR / medVol;
+      const G = groupOf(r);
+      if (G.why) ex(G.why);
+      if (G.pool) { poolC.push(r); continue; }
+      if (!G.g) continue;
+      r.g = G.g; r.risk = riskOf(r, regime);
+      if (G.g === 'pick') picks.push(Object.assign(r, grade(r, regime.mode)));
+      else if (G.g === 'st') near.push(Object.assign(r, { tier: 0 }));
+      else one.push(Object.assign(r, { tier: 0 }));
+    }
+    picks.sort((x, y) => y.D.rr - x.D.rr);
+    near.sort((x, y) => y.B.volR - x.B.volR);
 
     setProgress('تحديث السجل', 0.9);
     await evaluateJournal();
-    addToJournal(picks.concat(near), regime.mode, regime.ctx);
+    addToJournal(picks.concat(near, one, drawCtrl(poolC, now)), regime.mode, regime.ctx, now);
 
-    S.last = { t: Date.now(), regime, picks, near, excluded, universe: universe.length, analyzed: survivors.length, weight: S.weight, requests: S.requests, base: S.base };
+    S.last = { v: 4, t: Date.now(), regime, picks, near, excluded, medVol, universe: universe.length, analyzed: rows.length, weight: S.weight, requests: S.requests, base: S.base };
     store.set('last', S.last);
     setProgress('اكتمل', 1);
   } catch (e) {
@@ -592,36 +532,31 @@ async function scan() {
   }
 }
 
-/* ===================== السجل الظلي: عدة خطط على نفس الإشارة ===================== */
-/* A = مرجع v1 (الحقول المسطحة). W = دخول فوري + هدف. P = limit + هدف (المعتمد). H = limit أو اختراق، أيهما أولًا، ثم وقف متحرك بلا هدف. */
-function buildPlans(a, atr) {
-  const V = CFG.V2;
-  if (!(atr > 0)) return {};
-  const Wp = { e: a.e, s: Math.min(a.s, a.e - V.stopAtr * atr), t: Math.min(a.t, a.e + V.reachAtr * atr) };
-  if (!(Wp.t > Wp.e) || !(Wp.s < Wp.e)) return {};
-  return {
-    W: Wp,
-    P: { e: a.e - V.pullAtr * atr, s: Wp.s, t: Wp.t, ttl: V.pullTTLh * 36e5 },
-    H: { lo: a.e - V.pullAtr * atr, hi: a.e + V.brkAtr * atr, s: Wp.s, atr, ttl: V.pullTTLh * 36e5 },
-    S: { e: Wp.e, s: Wp.s, t: Wp.t, atr },
-  };
+/* ===================== السجل الظلي ===================== */
+const isOpen = j => !!(j.pl && j.pl.W) && (!j.alt || !j.alt.W || j.alt.W.status === 'open');
+/* الضابطة: 3 عملات عشوائية من البقية بنفس هندسة الدخول، مرة كل 4 ساعات على الأكثر. */
+function drawCtrl(rows, now) {
+  const lastC = Math.max(0, ...S.journal.filter(j => j.g === 'ctrl').map(j => j.t));
+  if (now - lastC < CFG.ctrl.everyH * 36e5) return [];
+  const busy = new Set(S.journal.filter(isOpen).map(j => j.sym));
+  const c = rows.filter(r => !busy.has(r.sym));
+  for (let i = c.length - 1; i > 0; i--) { const k = Math.floor(Math.random() * (i + 1)); [c[i], c[k]] = [c[k], c[i]]; }
+  return c.slice(0, CFG.ctrl.n).map(r => Object.assign(r, { g: 'ctrl', tier: 0 }));
 }
-function addToJournal(picks, mode, ctx) {
-  const openSyms = new Set(S.journal.filter(j => j.status === 'open').map(j => j.sym));
-  const t = Date.now();
-  for (const p of picks) {
-    if (openSyms.has(p.sym)) continue;
-    const j = {
-      id: p.sym + '-' + t, sym: p.sym, tier: p.tier, mode, t,
-      entry: p.D.entry, stop: p.D.stop, target: p.D.target, status: 'open',
-      f: { atrPct: p.D.atrPct, ratio: p.A.ratio, move: p.A.move, volR: p.B.volR, trR: p.B.trR, sizeR: p.B.sizeR, rel3: p.C.rel3, rel7: p.C.rel7, chg: p.chg, qv: p.qv, spread: p.spread, sky: p.D.sky, sigs: (p.A.pass ? 'A' : '') + (p.B.pass ? 'B' : '') + (p.C.pass ? 'C' : ''), mk: ctx || null, rs: p.rs, ev: p.ev, top: p.top ? 1 : 0, evLive: 1 },
-      v3: 1,
+function addToJournal(rows, mode, ctx, t) {
+  const open = new Set(S.journal.filter(isOpen).map(j => j.sym + '|' + j.g));
+  for (const p of rows) {
+    if (open.has(p.sym + '|' + p.g)) continue; // نفس العملة في نفس المجموعة تُسجَّل مرة واحدة حتى تُغلق
+    const D = p.D, Wp = { e: rp(D.entry, 6), s: rp(D.stop, 6), t: rp(D.target, 6) };
+    S.journal.push({
+      id: p.sym + '-' + t, sym: p.sym, g: p.g, tier: p.tier, raw: p.raw || 0, mode, t, v: 4,
+      entry: Wp.e, stop: Wp.s, target: Wp.t,
+      pl: { W: Wp, S: Object.assign({ atr: rp(D.atr, 6) }, Wp) },
+      f: { atrPct: rp(D.atrPct), sky: D.sky ? 1 : 0, st: D.stGreen ? 1 : 0, b: p.B.pass ? 1 : 0, c: p.C.pass ? 1 : 0,
+        volR: rp(p.B.volR), vx: rp(p.B.vx), trR: rp(p.B.trR), sizeR: rp(p.B.sizeR), rel3: rp(p.C.rel3), rel7: rp(p.C.rel7),
+        ratio: rp(p.A.ratio), move: rp(p.A.move), chg: rp(p.chg), qv: Math.round(p.qv), spread: rp(p.spread, 3), mk: ctx || null },
       rk: p.risk ? { lv: p.risk.lv, pts: p.risk.pts } : null,
-    };
-    j.pl = buildPlans({ e: j.entry, s: j.stop, t: j.target }, p.D.atr);
-    if (j.pl.H) j.pl.H.live = true; // صفقة جديدة: تدخل في الحكم على H
-    if (j.pl.S) j.pl.S.live = true;
-    S.journal.push(j);
+    });
   }
   store.set('journal', S.journal);
 }
@@ -629,7 +564,7 @@ function addToJournal(picks, mode, ctx) {
 function mk(status, price, when, p, t0, extra) {
   return Object.assign({ status, exit: price, closeT: when, result: (price / p.e - 1) * 100, risk: (p.e - p.s) / p.e * 100, days: (when - t0) / 864e5 }, extra || {});
 }
-/* وقف وهدف ثابتان. إذا لمست الشمعة الاثنين تُحسب خسارة. */
+/* W: دخول فوري، وقف وهدف ثابتان. إذا لمست الشمعة الاثنين تُحسب خسارة. */
 function simStd(p, cs, t0, expired) {
   for (const k of cs) {
     if (k.l <= p.s) return mk('loss', p.s, k.ct, p, t0);
@@ -638,38 +573,9 @@ function simStd(p, cs, t0, expired) {
   if (expired && cs.length) { const k = cs[cs.length - 1]; return mk('expired', k.c, k.ct, p, t0); }
   return { status: 'open' };
 }
-/* H: أمران معلّقان معًا، limit تحت السعر وشراء عند الاختراق فوقه، أيهما يُنفَّذ أولًا خلال المدة.
-   بعد التنفيذ لا هدف: الوقف يبقى مكانه حتى يتحرك السعر actAtr×ATR، ثم يلحق أعلى سعر بمسافة trailAtr×ATR ولا ينزل.
-   الشمعة الصاعدة يُفترض أنها لمست القاع أولًا، والهابطة القمة أولًا. شمعة التنفيذ لا ترفع الوقف. */
-function simH(p, cs, t0, now, expired) {
-  const V = CFG.V2;
-  let fi = -1, fill = 0;
-  for (let i = 0; i < cs.length; i++) {
-    const k = cs[i];
-    if (k.t - t0 >= p.ttl) return { status: 'nofill' };
-    const lo = k.l <= p.lo, hi = k.h >= p.hi;
-    if (!lo && !hi) continue;
-    fill = lo && hi ? (k.c >= k.o ? Math.min(p.lo, k.o) : Math.max(p.hi, k.o)) : lo ? Math.min(p.lo, k.o) : Math.max(p.hi, k.o);
-    fi = i; break;
-  }
-  if (fi < 0) return now - t0 >= p.ttl ? { status: 'nofill' } : { status: 'pending' };
-  const q = { e: fill, s: p.s }, tf = cs[fi].t;
-  if (!(fill > p.s)) return { status: 'nofill' };
-  if (cs[fi].l <= p.s) return mk('loss', p.s, cs[fi].ct, q, tf);
-  let stop = p.s, hh = fill, on = false;
-  for (let i = fi + 1; i < cs.length; i++) {
-    const k = cs[i];
-    if (k.l <= stop) return mk(stop > fill ? 'win' : 'loss', stop, k.ct, q, tf);
-    if (k.h > hh) hh = k.h;
-    if (hh >= fill + V.actAtr * p.atr) on = true;
-    if (on) stop = Math.max(stop, hh - V.trailAtr * p.atr);
-  }
-  if (expired && cs.length) { const k = cs[cs.length - 1]; return mk('expired', k.c, k.ct, q, tf); }
-  return { status: 'open' };
-}
-/* S: نصف المركز يُباع عند الهدف، والنصف الآخر وقفه على الدخول ثم يلحق أعلى سعر بمسافة trailAtr×ATR. */
+/* S: نفس الدخول والوقف. نصف المركز عند الهدف، والنصف الآخر وقفه على الدخول ثم يلحق أعلى سعر بمسافة 2 ATR. */
 function simSplit(p, cs, t0, expired) {
-  const V = CFG.V2, half = x => (x / p.e - 1) * 50;
+  const half = x => (x / p.e - 1) * 50;
   let hit = -1;
   for (let i = 0; i < cs.length; i++) {
     const k = cs[i];
@@ -685,126 +591,51 @@ function simSplit(p, cs, t0, expired) {
     const k = cs[i];
     if (k.l <= stop) return mk('win', stop, k.ct, p, t0, { result: half(p.t) + half(stop) });
     if (k.h > hh) hh = k.h;
-    stop = Math.max(stop, hh - V.trailAtr * p.atr);
+    stop = Math.max(stop, hh - CFG.D.trailAtr * p.atr);
   }
   if (expired && cs.length) { const k = cs[cs.length - 1]; return mk('win', k.c, k.ct, p, t0, { result: half(p.t) + half(k.c) }); }
   return { status: 'open' };
-}
-/* أمر limit عند تراجع، صالح مدة محددة. يُلغى إذا وصل الهدف قبل التنفيذ. */
-function simPull(p, cs, t0, now, expired) {
-  let fi = -1;
-  for (let i = 0; i < cs.length; i++) {
-    const k = cs[i];
-    if (k.t - t0 >= p.ttl) return { status: 'nofill' };
-    if (k.l <= p.e) { fi = i; break; }
-    if (k.h >= p.t) return { status: 'nofill' };
-  }
-  if (fi < 0) return now - t0 >= p.ttl ? { status: 'nofill' } : { status: 'pending' };
-  const k0 = cs[fi], tf = k0.t;
-  if (k0.l <= p.s) return mk('loss', p.s, k0.ct, p, tf);
-  return simStd(p, cs.slice(fi + 1), tf, expired);
-}
-
-function closeTrade(j, r) { j.status = r.status; j.exit = r.exit; j.closeT = r.closeT; j.result = r.result; j.days = r.days; }
-function excursions(j, cs) {
-  if (j.status === 'open' || j.mfe !== undefined || !j.closeT) return;
-  let hi = j.entry, lo = j.entry;
-  for (const k of cs) { if (k.ct >= j.closeT) break; if (k.h > hi) hi = k.h; if (k.l < lo) lo = k.l; }
-  j.mfe = (hi / j.entry - 1) * 100; j.mae = (lo / j.entry - 1) * 100;
-}
-/* هل وصل السعر إلى الهدف بعد أن ضُرب الوقف (داخل نفس المدة)؟ */
-function recovery(j, cs, expired) {
-  if (j.status !== 'loss' || j.rec !== undefined) return;
-  for (const k of cs) {
-    if (k.t > j.closeT && k.h >= j.target) { j.rec = true; j.recD = (k.ct - j.t) / 864e5; return; }
-  }
-  if (expired) j.rec = false;
 }
 function runSim(j, ks, now) {
   const hz = CFG.journal.horizonDays * 864e5;
   const cs = closedK(ks, now).filter(k => k.t >= j.t && k.t - j.t < hz);
   const expired = now - j.t >= hz;
-  if (j.status === 'open') {
-    const r = simStd({ e: j.entry, s: j.stop, t: j.target }, cs, j.t, expired);
-    if (r.status !== 'open') closeTrade(j, r);
+  if (!j.pl || !j.pl.W) return;
+  j.alt = j.alt || {};
+  for (const key of ['W', 'S']) {
+    const p = j.pl[key], cur = j.alt[key];
+    if (!p || (key === 'S' && !(p.atr > 0)) || (cur && cur.status !== 'open')) continue;
+    j.alt[key] = key === 'S' ? simSplit(p, cs, j.t, expired) : simStd(p, cs, j.t, expired);
   }
-  if (j.pl) {
-    j.alt = j.alt || {};
-    if (j.pl.W && !j.pl.H && j.f && j.f.atrPct > 0) { const atr = j.entry * j.f.atrPct / 100; j.pl.H = { lo: j.entry - CFG.V2.pullAtr * atr, hi: j.entry + CFG.V2.brkAtr * atr, s: j.pl.W.s, atr, ttl: CFG.V2.pullTTLh * 36e5 }; }
-    if (j.pl.W && !j.pl.S && j.f && j.f.atrPct > 0) { const atr = j.entry * j.f.atrPct / 100; j.pl.S = { e: j.pl.W.e, s: j.pl.W.s, t: j.pl.W.t, atr }; }
-    for (const key of ['W', 'P', 'H', 'S']) {
-      const p = j.pl[key], cur = j.alt[key];
-      if (!p || (cur && cur.status !== 'open' && cur.status !== 'pending')) continue;
-      j.alt[key] = key === 'H' ? simH(p, cs, j.t, now, expired) : key === 'P' ? simPull(p, cs, j.t, now, expired) : key === 'S' ? simSplit(p, cs, j.t, expired) : simStd(p, cs, j.t, expired);
-    }
-  }
-  excursions(j, cs);
-  recovery(j, cs, expired);
+  // سعر السوق الحالي للصفقة المفتوحة: يدخل في الرقم المبكر فقط
+  if (j.alt.W.status === 'open' && cs.length) j.alt.W.mk = cs[cs.length - 1].c;
 }
-function needsEval(j) {
-  const hz = CFG.journal.horizonDays * 864e5;
-  if (j.status === 'open') return true;
-  if (j.pl && !j.alt) return true;
-  if (j.pl && j.pl.W && !j.pl.H && j.f && j.f.atrPct > 0) return true;
-  if (j.pl && j.pl.W && !j.pl.S && j.f && j.f.atrPct > 0) return true;
-  if (j.alt && Object.values(j.alt).some(a => a.status === 'open' || a.status === 'pending')) return true;
-  if (j.status === 'loss' && j.rec === undefined && j.pl) return true;
-  if (j.status === 'loss' && j.rec === undefined && Date.now() - j.t < hz) return true;
-  return false;
-}
+const needsEval = j => isOpen(j) || !!(j.pl && j.pl.S && j.pl.S.atr > 0 && j.alt && j.alt.S && j.alt.S.status === 'open');
 async function evaluateJournal() {
   const list = S.journal.filter(needsEval).sort((a, b) => a.t - b.t).slice(0, CFG.journal.maxEval);
   if (!list.length) return;
-  const res = await pool(list, CFG.conc, j => kl(j.sym, '1h', 250, j.t));
+  const res = await pool(list, CFG.conc, j => kl(j.sym, '1h', 200, j.t));
   const now = Date.now();
-  list.forEach((j, i) => { const ks = res[i]; if (!ks || ks.err) return; runSim(j, ks, now); });
+  list.forEach((j, i) => { const ks = res[i]; if (ks && !ks.err) runSim(j, ks, now); });
   store.set('journal', S.journal);
-}
-
-/* تحليل رجعي: يجلب الشموع من المتصفح نفسه لكل صفقة قديمة ويعيد بناء الخطط البديلة والتشخيص. */
-async function backfill() {
-  if (S.running || S.bf) return;
-  if (Date.now() < S.haltUntil) { S.bfMsg = 'Binance طلبت التوقف مؤقتًا. حاول بعد قليل.'; render(); return; }
-  const items = S.journal.filter(j => !j.pl || (j.pl.W && !j.pl.S)).slice(0, 60);
-  if (!items.length) { S.bfMsg = 'كل صفقات السجل محلّلة.'; render(); return; }
-  S.bf = { done: 0, n: items.length }; S.bfMsg = null; S.weight = 0; S.abort = null; render();
-  try {
-    await ensureBase();
-    await pool(items, CFG.conc, async j => {
-      if (j.pl) { const k1 = await kl(j.sym, '1h', 250, j.t); runSim(j, k1, Date.now()); return; }
-      const [k1, k4] = await Promise.all([kl(j.sym, '1h', 250, j.t), kl(j.sym, '4h', 40, null, j.t)]);
-      const c4 = closedK(k4, j.t);
-      const atr = atrSeries(c4, CFG.D.atrLen).pop();
-      j.pl = buildPlans({ e: j.entry, s: j.stop, t: j.target }, atr);
-      if (atr > 0) j.f = Object.assign({}, j.f, { atrPct: atr / j.entry * 100 });
-      runSim(j, k1, Date.now());
-      j.retro = true;
-    }, (d) => { S.bf.done = d; if (S.tab === 'journal') render(); });
-    store.set('journal', S.journal);
-    const left = S.journal.filter(j => !j.pl || (j.pl.W && !j.pl.S)).length;
-    S.bfMsg = 'اكتمل التحليل.' + (left ? ' تبقّت ' + left + ' صفقة، اضغط مرة أخرى.' : ' انسخ السجل من الأسفل والصقه في المحادثة.');
-  } catch (e) {
-    store.set('journal', S.journal);
-    S.bfMsg = e.halt ? 'Binance طلبت التوقف مؤقتًا، وحُفظ ما اكتمل. أعد المحاولة بعد دقائق.' : e.conn ? 'تعذر الوصول إلى Binance. افتح الإعدادات واضغط "اختبار الاتصال".' : 'توقف التحليل: ' + e.message;
-  } finally { S.bf = null; render(); }
 }
 
 /* تصدير الشموع بصيغة مضغوطة (نقاط أساس من سعر الدخول) لتحليل أعمق خارج التطبيق. */
 async function exportCandles() {
   if (S.running || S.bf) return;
   if (Date.now() < S.haltUntil) { S.bfMsg = 'Binance طلبت التوقف مؤقتًا. حاول بعد قليل.'; render(); return; }
-  const items = S.journal.slice(-80);
+  const items = S.journal.slice(-150);
   if (!items.length) { S.bfMsg = 'السجل فارغ.'; render(); return; }
   S.bf = { done: 0, n: items.length }; S.bfMsg = null; S.weight = 0; S.abort = null; S.exportText = null; render();
   try {
     await ensureBase();
     const out = [];
     await pool(items, CFG.conc, async j => {
-      const ks = await kl(j.sym, '1h', 130, j.t);
+      const ks = await kl(j.sym, '1h', 180, j.t);
       const c = closedK(ks).filter(k => k.t >= j.t);
       const e = j.entry, bp = x => Math.round((x / e - 1) * 1e4);
       const t0 = c.length ? c[0].t : j.t;
-      out.push({ s: j.sym.replace('USDT', ''), tier: j.tier, t: j.t, e, a: j.f && j.f.atrPct ? +j.f.atrPct.toFixed(3) : null, st: j.stop, tg: j.target, t0, k: c.map(k => [Math.round((k.t - t0) / 36e5), bp(k.h), bp(k.l), bp(k.c)]) });
+      out.push({ s: j.sym.replace('USDT', ''), g: j.g || null, tier: j.tier, t: j.t, e, a: j.f && j.f.atrPct ? +(+j.f.atrPct).toFixed(3) : null, st: j.stop, tg: j.target, t0, k: c.map(k => [Math.round((k.t - t0) / 36e5), bp(k.h), bp(k.l), bp(k.c)]) });
     }, d => { S.bf.done = d; if (S.tab === 'journal') render(); });
     S.exportText = JSON.stringify({ app: 'radar-candles', exported: new Date().toISOString(), units: 'k=[hourIdx,high,low,close] بنقاط أساس من سعر الدخول؛ الشمعة الأولى تبدأ عند t0', trades: out });
     S.bfMsg = 'جاهزة (' + out.length + ' صفقة). اضغط "نسخ النص" ثم الصقه في المحادثة.';
@@ -813,73 +644,74 @@ async function exportCandles() {
   } finally { S.bf = null; render(); }
 }
 
-/* ===================== إحصاءات السجل ===================== */
-/* R لكل إشارة بعد الرسوم. الإشارة التي لم يُنفَّذ أمرها = 0. null = لم تُحسم بعد. */
+/* ===================== القياس ===================== */
+/* R بعد الرسوم. لا يُحتسب إلا بعد اكتمال أفق 7 أيام، حتى لا تنحاز النتيجة للرابحة التي تُغلق أسرع. */
 function planR(j, key) {
-  const fee = CFG.fee;
-  if (key === 'A') return j.status === 'open' || j.result == null ? null : (j.result - fee) / ((j.entry - j.stop) / j.entry * 100);
   const a = j.alt && j.alt[key];
-  if (!a) return null;
-  if (a.status === 'nofill') return 0;
-  if (a.risk == null || a.result == null) return null;
-  return (a.result - fee) / a.risk;
+  if (!a || a.status === 'open' || a.risk == null || a.result == null) return null;
+  return (a.result - CFG.fee) / a.risk;
 }
-/* الصفقات من المسح نفسه تتحرك معًا، فالمسح هو المشاهدة المستقلة: متوسط كل مسح، ثم متوسط المسوح وفترة ثقة 95%. */
-function clustered(pairs) {
-  const g = new Map();
-  for (const [t, v] of pairs) { if (!g.has(t)) g.set(t, []); g.get(t).push(v); }
-  const m = [...g.values()].map(a => sum(a, x => x) / a.length), n = m.length;
-  const mean = n ? sum(m, x => x) / n : 0;
-  const sd = n > 1 ? Math.sqrt(sum(m, x => (x - mean) ** 2) / (n - 1)) : 0;
-  return { scans: n, mean, ci: n > 1 ? 1.96 * sd / Math.sqrt(n) : null };
-}
-function planStats(key, filter) {
-  const list = S.journal.filter(j => !filter || filter(j));
-  const pairs = [];
-  let trades = 0, wins = 0, nofill = 0;
-  for (const j of list) {
-    const r = planR(j, key);
-    if (r == null) continue;
-    pairs.push([j.t, r]);
-    const a = key === 'A' ? null : j.alt[key];
-    if (a && a.status === 'nofill') nofill++; else { trades++; if (r > 0) wins++; }
-  }
-  return Object.assign(clustered(pairs), { n: pairs.length, trades, nofill, win: trades ? wins / trades * 100 : 0 });
+const doneR = (j, key = 'W', now = Date.now()) => now - j.t >= CFG.journal.horizonDays * 864e5 ? planR(j, key) : null;
+/* الرقم المبكر: المغلقة بنتيجتها، والمفتوحة بسعر السوق عند آخر تقييم. */
+function markR(j) {
+  const r = planR(j, 'W');
+  if (r != null) return r;
+  const a = j.alt && j.alt.W, p = j.pl && j.pl.W;
+  return a && a.mk && p ? ((a.mk / p.e - 1) * 100 - CFG.fee) / ((p.e - p.s) / p.e * 100) : null;
 }
 const weakMk = j => j.f && j.f.mk && (j.f.mk.up === 0 || j.f.mk.br < CFG.RISK.breadth);
-/* الحكم على خطة اختبار مقابل خطة أساس: الصفقات الجديدة فقط، والفرق محسوب داخل كل مسح. H مقابل P، وT وS مقابل W. */
-function hTest(key = 'H', base = 'P') {
-  const T = CFG.TEST, all = [], weak = [];
-  for (const j of S.journal) {
-    if (!(j.pl && j.pl[key] && j.pl[key].live)) continue;
-    const h = planR(j, key), p = planR(j, base);
-    if (h == null || p == null) continue;
-    all.push([j.t, h - p]);
-    if (weakMk(j)) weak.push([j.t, h - p]);
-  }
-  const A = clustered(all), Wk = clustered(weak);
+/* الأيام هي المشاهدة المستقلة: صفقات اليوم الواحد تتحرك مع BTC نفسه. */
+function byDay(pairs) {
+  const g = new Map();
+  for (const [t, v] of pairs) { const d = dayOf(t); if (!g.has(d)) g.set(d, []); g.get(d).push(v); }
+  return g;
+}
+function dayStats(vals) {
+  const n = vals.length, m = mean(vals);
+  const sd = n > 1 ? Math.sqrt(sum(vals, x => (x - m) ** 2) / (n - 1)) : 0;
+  return { days: n, mean: m, ci: n > 1 ? 1.96 * sd / Math.sqrt(n) : null };
+}
+function groupStats(list, fn) {
+  const pairs = list.map(j => [j.t, fn(j)]).filter(x => x[1] != null);
+  return Object.assign(dayStats([...byDay(pairs).values()].map(mean)), { n: pairs.length });
+}
+/* فترات السوق الضعيف المنفصلة: أيام ضعيفة يفصل بينها أسبوع أو أكثر تُعد فترتين. */
+function episodes(days) {
+  const s = [...days].sort((a, b) => a - b);
+  let n = 0, prev = -1e9;
+  for (const d of s) { if (d - prev >= CFG.TEST.epGap) n++; prev = d; }
+  return n;
+}
+/* مقارنة مجموعتين داخل اليوم نفسه: الفرق = متوسط A − متوسط B في كل يوم يجمعهما، ثم المتوسط عبر الأيام. */
+function compare(fa, fb, a, b, val) {
+  const v4 = S.journal.filter(j => j.v === 4);
+  const A = byDay(v4.filter(fa).map(j => [j.t, val(j, a)]).filter(x => x[1] != null));
+  const B = byDay(v4.filter(fb).map(j => [j.t, val(j, b)]).filter(x => x[1] != null));
+  const weakD = new Set(v4.filter(weakMk).map(j => dayOf(j.t)));
+  const all = [], weak = [];
+  for (const [d, xs] of A) { if (!B.has(d)) continue; const x = mean(xs) - mean(B.get(d)); all.push(x); if (weakD.has(d)) weak.push(x); }
+  const wd = [...A.keys()].filter(d => B.has(d) && weakD.has(d));
+  return { all: dayStats(all), weak: dayStats(weak), eps: episodes(wd) };
+}
+const TESTS = [
+  { k: 'edge', title: 'هل للرادار حافة؟', sub: 'المرشحون مقابل عملات عشوائية بنفس هندسة الدخول', fa: j => j.g === 'pick', fb: j => j.g === 'ctrl', yes: 'حافة مثبتة: المرشحون يتفوقون على العشوائية في كل الأسواق.', no: 'لا حافة: الرادار يركب حركة السوق ولا يضيف انتقاءً.' },
+  { k: 'D', title: 'هل يضيف اتجاه 4H شيئًا؟', sub: 'B+C مع Supertrend أخضر مقابل أحمر', fa: j => j.g === 'pick', fb: j => j.g === 'st', yes: 'D يضيف: يبقى شرطًا.', no: 'D لا يضيف: يمكن حذفه وتصبح B+C وحدها كافية.' },
+  { k: 'BC', title: 'هل يلزم B وC معًا؟', sub: 'B+C مقابل إشارة واحدة، كلاهما مع D', fa: j => j.g === 'pick', fb: j => j.g === 'one', yes: 'الشرط المزدوج ثابت.', no: 'لا فرق: إشارة واحدة تكفي.' },
+  { k: 'S', title: 'هل يتفوق الخروج S على W؟', sub: 'نفس المرشحين: نصف عند الهدف والباقي متحرك، مقابل الهدف الثابت', fa: j => j.g === 'pick', fb: j => j.g === 'pick', a: 'S', b: 'W', yes: 'S تُعتمد: نعرضها في البطاقة بدل W.', no: 'S تسقط: الهدف الثابت أفضل أو مساوٍ.' },
+];
+function runTest(T) {
+  const now = Date.now();
+  const done = compare(T.fa, T.fb, T.a || 'W', T.b || 'W', (j, k) => doneR(j, k, now));
+  const early = T.k === 'S' ? null : compare(T.fa, T.fb, 'W', 'W', j => markR(j));
+  const X = CFG.TEST, A = done.all;
   let verdict, cls = '';
-  if (A.scans < T.scans || Wk.scans < T.weak) verdict = `قيد الاختبار: ${A.scans}/${T.scans} مسح، منها ${Wk.scans}/${T.weak} في سوق ضعيف. لا حكم قبل اكتمالهما.`;
-  else if (A.mean >= T.adopt && Wk.mean > 0) { verdict = `تُعتمد ${key}: تفوقت بما يكفي، وصمدت في السوق الضعيف.`; cls = 'win'; }
-  else if (A.mean < T.drop || Wk.mean < 0) { verdict = `تسقط ${key}: التفوق غير كافٍ أو خسرت في السوق الضعيف.`; cls = 'loss'; }
+  if (A.days < X.days || done.eps < X.weakEp) verdict = `قيد الجمع: ${A.days}/${X.days} يومًا مكتملًا، و${done.eps}/${X.weakEp} فترة سوق ضعيف. لا حكم قبل اكتمالهما.`;
+  else if (A.mean >= X.adopt && done.weak.mean > 0) { verdict = T.yes; cls = 'win'; }
+  else if (A.mean < X.drop || done.weak.mean < 0) { verdict = T.no; cls = 'loss'; }
   else verdict = 'غير حاسم: نواصل حتى يتضح الفرق.';
-  return { A, Wk, verdict, cls };
+  return { done, early, verdict, cls };
 }
-/* الحكم على قوة الدليل: "هجوم" مقابل "ضعيف" بخطة الدخول الفوري W، الصفقات الجديدة فقط. */
-function evTest() {
-  const E = CFG.EV, live = S.journal.filter(j => j.f && j.f.evLive && j.f.ev);
-  const side = (ev, f) => clustered(live.filter(j => j.f.ev === ev && (!f || f(j))).map(j => [j.t, planR(j, 'W')]).filter(x => x[1] != null));
-  const atk = side('atk'), wk = side('weak'), atkW = side('atk', weakMk), wkW = side('weak', weakMk);
-  const scans = new Set(live.map(j => j.t)).size, wscans = new Set(live.filter(weakMk).map(j => j.t)).size;
-  const diff = atk.scans && wk.scans ? atk.mean - wk.mean : null, diffW = atkW.scans && wkW.scans ? atkW.mean - wkW.mean : null;
-  let verdict, cls = '';
-  if (scans < E.scans || wscans < E.weak || diff == null) verdict = `قيد الاختبار: ${scans}/${E.scans} مسح، منها ${wscans}/${E.weak} في سوق ضعيف.`;
-  else if (diff >= E.adopt && (diffW == null || diffW > 0)) { verdict = 'يُعتمد التصنيف الجديد: "هجوم" يتفوق بوضوح.'; cls = 'win'; }
-  else if (diff < E.drop || (diffW != null && diffW < 0)) { verdict = 'يسقط التصنيف الجديد: الفرق غير كافٍ.'; cls = 'loss'; }
-  else verdict = 'غير حاسم: نواصل.';
-  return { atk, wk, diff, diffW, verdict, cls };
-}
-const fmtRci = s => s.n ? `${fmtR(s.mean)}${s.ci != null ? ` <span class="muted">±${s.ci.toFixed(2)}</span>` : ''}` : '—';
+const fmtCI = s => s.days ? `${fmtR(s.mean)}${s.ci != null ? ` <span class="muted">±${s.ci.toFixed(2)}</span>` : ''}` : '—';
 
 /* ===================== العرض ===================== */
 function el() { return document.getElementById('app'); }
@@ -904,6 +736,7 @@ function regimeHTML() {
   </section>`;
 }
 
+const backupDue = () => S.journal.length >= 10 && Date.now() - (S.exportedAt || 0) > CFG.backupDays * 864e5;
 function scanAreaHTML() {
   const now = Date.now();
   let label = 'مسح الآن', dis = false;
@@ -924,58 +757,38 @@ function scanAreaHTML() {
     </div>
     ${L ? `<div class="status" style="margin-top:2px"><span>المصدر <span class="num">${esc(src)}</span></span><span>حُلّلت <span class="num">${L.analyzed}</span> من <span class="num">${L.universe}</span></span></div>` : ''}
     ${S.error ? `<div class="alert">${esc(S.error)}</div>` : ''}
-    ${S.storageErr ? `<div class="alert">المتصفح يمنع الحفظ. السجل لن يُحفظ بين الجلسات؛ شغّل الصفحة من أيقونة الشاشة الرئيسية.</div>` : ''}`;
+    ${S.storageErr ? `<div class="alert">المتصفح يمنع الحفظ. السجل لن يُحفظ؛ شغّل الصفحة من أيقونة الشاشة الرئيسية وانسخ السجل الآن.</div>` : ''}
+    ${backupDue() ? `<div class="alert">مضى أكثر من ${CFG.backupDays} أيام بلا نسخة احتياطية للسجل. Safari قد يمسح بيانات المواقع. افتح السجل واضغط "نسخ السجل".</div>` : ''}`;
 }
 
-/* الدخول المعتمد: أمر limit تحت السعر. إن لم يصلح (الوقف أعلى منه) يبقى الدخول الفوري. */
-function entryPlan(p) {
-  const D = ap(p), V = CFG.V2;
-  const lim = p.D && p.D.atr > 0 ? D.entry - V.pullAtr * p.D.atr : null;
-  if (lim && lim > D.stop) return { entry: lim, limit: true, stopPct: (lim - D.stop) / lim * 100, targetPct: (D.target / lim - 1) * 100 };
-  return { entry: D.entry, limit: false, stopPct: D.stopPct, targetPct: D.targetPct };
-}
 function pickHTML(p) {
   const open = S.open[p.sym];
-  const D = ap(p);
+  const D = p.D;
   const sig = (k, on, title) => `<span class="sig ${on ? 'on' : ''}" title="${title}">${k}</span>`;
   const rk = +S.settings.riskUsd || 0;
-  const V2c = CFG.V2;
-  const L = entryPlan(p);
-  L.rr = L.stopPct > 0 ? L.targetPct / L.stopPct : 0;
   const flags = [];
-  if (p.low) flags.push(`<span class="flag gold">سيولة استثنائية</span>`);
-  if (p.B.suspect) flags.push(`<span class="flag warn">اشتباه ضخ</span>`);
-  if (p.ev) flags.push(`<span class="flag ${p.ev === 'atk' ? 'gold' : p.ev === 'weak' ? 'warn' : ''}">دليل: ${EVW[p.ev]}${p.ev === 'weak' ? ' (بلا B)' : ''}</span>`);
-  if (p.top) flags.push(`<span class="flag gold">ضمن أفضل ${CFG.EV.top} في المسح</span>`);
-  if (D.sky) flags.push(`<span class="flag">قمة جديدة: الهدف مبني على ATR</span>`);
-  const sp = L.stopPct;
-  if (rk > 0 && sp > 0 && p.tier > 0) flags.push(`<span class="flag">للاسترشاد: حجم <span class="num">$${Math.round(rk / (sp / 100))}</span> يخسر <span class="num">$${rk}</span> عند الوقف</span>`);
-  if (p.rs != null) flags.push(`<span class="flag ${p.rs >= 80 ? 'gold' : ''}">قوة نسبية: أقوى من <span class="num">${p.rs}%</span> من السوق</span>`);
-  if (L.limit && p.tier > 0) flags.push(`<span class="flag">أمر limit صالح ${V2c.pullTTLh} ساعة، ألغِه إن بلغ السعر الهدف قبل التنفيذ</span>`);
-  if (p.gaps) p.gaps.forEach(g => flags.push(`<span class="flag gap">لم تجتز: ${esc(g)}</span>`));
+  if (p.g === 'st') flags.push(`<span class="flag gap">Supertrend 4H سلبي: انتظر انقلابه للأخضر</span>`);
   if (p.capped) flags.push(`<span class="flag">خُفّضت بسبب وضع السوق (${TIER[p.raw]})</span>`);
-  const V = CFG.V2;
-  const alt = p.V && p.D.atr > 0 ? `
-      <dt>الخطة الأصلية (وقف / هدف)</dt><dd class="num">${fmtPct(-p.D.stopPct)} / ${fmtPct(p.D.targetPct)}</dd>
-      <dt>ATR 4H</dt><dd class="num">${p.D.atrPct.toFixed(2)}%</dd>
-      <dt>الدخول الفوري بالسعر الحالي (للمقارنة)</dt><dd class="num">${fmtP(D.entry)}</dd>` : '';
+  if (p.low) flags.push(`<span class="flag gold">سيولة استثنائية</span>`);
+  if (D.sky) flags.push(`<span class="flag">قمة جديدة: لا مقاومة فوقها، الهدف ${CFG.D.reachAtr}×ATR</span>`);
+  if (rk > 0 && D.stopPct > 0 && p.g === 'pick') flags.push(`<span class="flag">للاسترشاد: حجم <span class="num">$${Math.round(rk / (D.stopPct / 100))}</span> يخسر <span class="num">$${rk}</span> عند الوقف</span>`);
   return `<article class="row" data-tier="${p.tier}" data-action="toggle" data-sym="${esc(p.sym)}" aria-expanded="${!!open}">
     <div class="top"><span class="sym">${esc(p.base)}<small>USDT</small></span><span class="tier">${TIER[p.tier]}</span></div>
     ${p.risk ? `<div class="risk" data-lv="${p.risk.lv}">خطورة ${RISK_W[p.risk.lv]}${p.risk.why.length ? ` <span>· ${esc(p.risk.why.join('، '))}</span>` : ''}</div>` : ''}
-    <div class="sigs">${sig('A', p.A.pass, 'طلب عدواني')}${sig('B', p.B.pass, 'مشاركة موزعة')}${sig('C', p.C.pass, 'قوة أمام BTC')}${sig('D', p.tier > 0, 'صفقة صالحة')}</div>
+    <div class="sigs">${sig('B', p.B.pass, 'مشاركة موزعة')}${sig('C', p.C.pass, 'قوة أمام BTC')}${sig('D', D.pass, 'اتجاه 4H وصفقة صالحة')}</div>
     <div class="levels">
-      <span>${L.limit ? 'أمر limit' : 'دخول'}<b class="num">${fmtP(L.entry)}</b></span>
-      <span>وقف<b class="num neg">${fmtPct(-L.stopPct)}</b></span>
-      <span>هدف<b class="num pos">${fmtPct(L.targetPct)}</b></span>
-      <span>عائد:مخاطرة<b class="num">${L.rr.toFixed(1)}</b></span>
+      <span>دخول فوري<b class="num">${fmtP(D.entry)}</b></span>
+      <span>وقف<b class="num neg">${fmtPct(-D.stopPct)}</b></span>
+      <span>هدف<b class="num pos">${fmtPct(D.targetPct)}</b></span>
+      <span>عائد:مخاطرة<b class="num">${D.rr.toFixed(2)}</b></span>
     </div>
     ${flags.length ? `<div class="flags">${flags.join('')}</div>` : ''}
     ${open ? `<div class="detail"><dl>
       <dt>سعر الوقف</dt><dd class="num">${fmtP(D.stop)}</dd>
-      <dt>سعر الهدف</dt><dd class="num">${fmtP(D.target)}</dd>${alt}
-      <dt>نسبة شراء الـ taker (48 س)</dt><dd class="num">${(p.A.ratio * 100).toFixed(1)}%</dd>
-      <dt>حركة السعر (48 س)</dt><dd class="num">${fmtPct(p.A.move)}</dd>
+      <dt>سعر الهدف</dt><dd class="num">${fmtP(D.target)}</dd>
+      <dt>ATR 4H</dt><dd class="num">${D.atrPct.toFixed(2)}%</dd>
       <dt>الحجم مقابل متوسط 6 أيام</dt><dd class="num">×${p.B.volR.toFixed(2)}</dd>
+      <dt>الحجم مقابل وسيط السوق اليوم</dt><dd class="num">×${(p.B.vx || 0).toFixed(2)}</dd>
       <dt>عدد الصفقات مقابل المتوسط</dt><dd class="num">×${p.B.trR.toFixed(2)}</dd>
       <dt>حجم الصفقة الواحدة مقابل الوسيط</dt><dd class="num">×${p.B.sizeR.toFixed(2)}</dd>
       <dt>التفوق على BTC (3 أيام / 7 أيام)</dt><dd class="num">${fmtPct(p.C.rel3)} / ${fmtPct(p.C.rel7)}</dd>
@@ -989,89 +802,75 @@ function picksHTML() {
   const L = S.last;
   if (!L) return `<div class="empty"><b>لا توجد قراءة بعد</b>المسح الأول يستغرق دقيقة تقريبًا.</div>`;
   let html = '';
+  const rk = +S.settings.riskUsd || 0;
   if (!L.picks.length) html += `<div class="empty"><b>لا توجد فرص تستحق الآن</b>هذا قرار أيضًا: الانتظار أفضل من صفقة ضعيفة.</div>`;
-  for (const t of [3, 2, 1]) {
-    const g = L.picks.filter(p => p.tier === t);
-    if (!g.length) continue;
-    html += `<section class="group"><h2>${TIER[t]} <span class="num">(${g.length})</span></h2>${g.map(pickHTML).join('')}</section>`;
+  else {
+    const head = `<h2>${TIER[L.picks[0].tier]} <span class="num">(${L.picks.length})</span></h2>
+      ${L.picks.length > 1 && rk > 0 ? `<p class="help">إن دخلتها كلها: مخاطرة مجمعة <span class="num">$${rk * L.picks.length}</span>. صفقات المسح الواحد تتحرك معًا غالبًا، فهي أقرب لرهان واحد على السوق.</p>` : ''}`;
+    const body = L.picks.map(pickHTML).join('');
+    html += L.regime.mode === 'defense'
+      ? `<details class="group"><summary class="help">وضع الدفاع: المرشحون مطويّون (${L.picks.length}). التسجيل في السجل مستمر. افتحها إن أردت.</summary>${head}${body}</details>`
+      : `<section class="group">${head}${body}</section>`;
   }
-  if (L.near && L.near.length) html += `<section class="group"><h2>قيد المراقبة <span class="num">(${L.near.length})</span></h2><p class="help">الأقرب للشروط لكنها لم تجتزها. ليست إشارة دخول: انتظر اكتمالها، أو ادخل بحجم أصغر وأنت تعرف ما ينقصها.</p>${L.near.map(pickHTML).join('')}</section>`;
+  if (L.near && L.near.length) {
+    const shown = L.near.slice(0, CFG.near.show);
+    html += `<section class="group"><h2>قيد المراقبة <span class="num">(${L.near.length})</span></h2><p class="help">B وC متحققتان والصفقة صالحة، لكن اتجاه 4H سلبي. ليست إشارة دخول.${L.near.length > shown.length ? ` تُعرض ${shown.length} الأعلى حجمًا، وكلها مسجلة.` : ''}</p>${shown.map(pickHTML).join('')}</section>`;
+  }
   const ex = Object.entries(L.excluded).sort((a, b) => b[1] - a[1]);
   if (ex.length) html += `<details class="excl"><summary>لماذا استُبعدت البقية (<span class="num">${sum(ex, e => e[1])}</span>)</summary><ul>${ex.map(([k, v]) => `<li><span>${esc(k)}</span><span class="num">${v}</span></li>`).join('')}</ul></details>`;
-  const V = CFG.V2;
+  const D = CFG.D;
   html += `<details class="legend"><summary>معنى الرموز</summary>
-    <p><b>A</b> طلب عدواني: المشترون يدفعون السعر بهدوء ولم يتمدد بعد. ترفع جيد جدًا إلى ممتاز فقط.</p>
-    <p><b>B</b> مشاركة موزعة: الحجم وعدد الصفقات يرتفعان معًا، بلا صفقات ضخمة مشبوهة.</p>
+    <p><b>B</b> مشاركة موزعة: حجم آخر 24 ساعة ×${CFG.B.vol} فأكثر من متوسط الأيام الستة قبلها، وعدد الصفقات يرتفع معه، بلا صفقات ضخمة.</p>
     <p><b>C</b> قوة أمام BTC: تتفوق على البيتكوين خلال 3 و7 أيام.</p>
-    <p><b>D</b> صفقة صالحة: Supertrend 4H إيجابي، ووقف لا يقل عن ${V.stopAtr}×ATR، وهدف واقعي (أقرب مقاومة بحد أقصى ${V.reachAtr}×ATR) لا يقل عن ${V.minTarget}%، وعائد/مخاطرة ${V.minRR} أو أكثر. الدخول بأمر limit عند ${V.pullAtr}×ATR تحت السعر الحالي (صالح ${V.pullTTLh} ساعة)، شرط إلزامي لكل ما يظهر.</p>
-    <p>جيد جدًا = D مع B وC. ممتاز = جيد جدًا مع A. جيد = D مع B أو C فقط. A وحدها لا تكفي للترشيح.</p>
-    <p>الخطورة: السوق ضعيف (+2)، BTC يهبط الآن (+1)، إشارة واحدة أو لم تجتز الشروط (+1)، اشتباه ضخ أو سيولة استثنائية (+1)، وقف أوسع من ${CFG.RISK.wideStop}% (+1). منخفضة 0–1، متوسطة 2، عالية 3 فأكثر. القرار والحجم لك.</p>
-    <p>القوة النسبية: نسبة العملات التي تتفوق عليها خلال 7 و14 يومًا. تُسجَّل للاختبار ولا تدخل في التصنيف بعد.</p>
-    <p>قوة الدليل (اختبار): هجوم = B مع C أو قمة جديدة، عادي = B وحدها، ضعيف = بلا B. في السجل حتى الآن B هي الإشارة الأقوى. أفضل ${CFG.EV.top} = أعلى قوة دليل ثم أعلى قوة نسبية في المسح. لا تغيّر الفئة ولا الدخول قبل الحكم.</p>
-    <p>قيد المراقبة = أعلى 3 تقييمًا من العملات التي لم تجتز الشروط، مع ما ينقص كل واحدة. ليست جاهزة للدخول. تُسجَّل في السجل كفئة مستقلة.</p></details>`;
+    <p><b>D</b> اتجاه 4H أخضر (Supertrend)، وصفقة صالحة: وقف = الأوسع بين آخر قاع و${D.stopAtr}×ATR وبحد أقصى ${D.maxStop}%، هدف = أقرب مقاومة بحد أقصى ${D.reachAtr}×ATR ولا يقل عن ${D.minTarget}%.</p>
+    <p>المرشح = B وC وD معًا. في السجل السابق كانت كل إشارة وحدها خاسرة، والاثنتان معًا هما الرابحتان.</p>
+    <p>الدخول فوري بسعر الطلب الحالي. أوامر limit تحت السعر نُفذت في السجل على الصفقات الضعيفة وفاتتها القوية، فأُلغيت.</p>
+    <p>الفئة: جيد جدًا في هجوم وانتقائي، وجيد في الدفاع (بوابة حالة السوق).</p>
+    <p>الخطورة: السوق ضعيف (+2)، BTC يهبط الآن (+1)، سيولة استثنائية (+1)، وقف أوسع من ${CFG.RISK.wideStop}% (+1). منخفضة 0–1، متوسطة 2، عالية 3 فأكثر. القرار والحجم لك.</p></details>`;
   return html;
 }
 
 function journalHTML() {
-  const vp = PLN[S.vp] ? S.vp : 'P';
-  const pending = S.journal.filter(j => !j.pl || (j.pl.W && !j.pl.S)).length;
-  let html = `<button class="btn" data-action="backfill" ${S.bf || S.running ? 'disabled' : ''}>${S.bf ? 'جلب الشموع ' + S.bf.done + '/' + S.bf.n : 'تحليل رجعي للسجل' + (pending ? ' (' + pending + ')' : '')}</button>
-  ${S.bfMsg ? `<p class="help">${esc(S.bfMsg)}</p>` : `<p class="help">يجلب شموع كل صفقة قديمة ويعيد اختبارها بالخطط البديلة. لا يحتاج إلا اتصالك بـ Binance.</p>`}`;
-
-  const ht = hTest();
-  html += `<h3>اختبار H مقابل المعتمد</h3>
-    <div class="note"><b class="${ht.cls}">${esc(ht.verdict)}</b>
-    <div class="jrow"><span>الفرق لكل مسح (كل الأسواق)</span><span class="num">${ht.A.scans ? fmtRci({ n: 1, mean: ht.A.mean, ci: ht.A.ci }) : '—'}</span></div>
-    <div class="jrow"><span>الفرق في السوق الضعيف</span><span class="num">${ht.Wk.scans ? fmtRci({ n: 1, mean: ht.Wk.mean, ci: ht.Wk.ci }) : '—'}</span></div>
-    <p class="help">تُعتمد إذا تفوقت بـ +${CFG.TEST.adopt}R فأكثر وكانت أفضل في السوق الضعيف. تسقط إذا قل التفوق عن +${CFG.TEST.drop}R أو خسرت في السوق الضعيف. الصفقات الجديدة فقط.</p></div>`;
-  for (const [k, b, lb] of [['S', 'W', 'نصف عند الهدف والباقي متحرك (S) مقابل الفوري']]) {
-    const t = hTest(k, b);
-    html += `<h3>${lb}</h3><div class="note"><b class="${t.cls}">${esc(t.verdict)}</b>
-    <div class="jrow"><span>الفرق لكل مسح</span><span class="num">${t.A.scans ? fmtRci({ n: 1, mean: t.A.mean, ci: t.A.ci }) : '—'}</span></div>
-    <div class="jrow"><span>في السوق الضعيف</span><span class="num">${t.Wk.scans ? fmtRci({ n: 1, mean: t.Wk.mean, ci: t.Wk.ci }) : '—'}</span></div></div>`;
+  const now = Date.now();
+  let html = `<h3>الحكم</h3><p class="help">النتيجة الرسمية تُحسب للصفقات التي أكملت ${CFG.journal.horizonDays} أيام فقط، ومن السجل الجديد (v4) فقط. اليوم هو المشاهدة المستقلة. الحكم بعد ${CFG.TEST.days} يومًا مكتملًا تشمل ${CFG.TEST.weakEp} فترتين منفصلتين في سوق ضعيف: يُعتمد الفرق إن بلغ +${CFG.TEST.adopt}R وكان موجبًا في السوق الضعيف، ويسقط إن قل عن +${CFG.TEST.drop}R أو كان سالبًا في السوق الضعيف.</p>`;
+  for (const T of TESTS) {
+    const r = runTest(T);
+    html += `<div class="note"><b>${T.title}</b><div class="muted" style="font-size:12.5px">${T.sub}</div>
+      <p class="${r.cls}" style="margin-top:6px">${esc(r.verdict)}</p>
+      <div class="jrow"><span>الفرق (مكتمل)</span><span class="num">${fmtCI(r.done.all)}${r.done.all.days ? ` <span class="muted">${r.done.all.days} يوم</span>` : ''}</span></div>
+      <div class="jrow"><span>في السوق الضعيف</span><span class="num">${fmtCI(r.done.weak)}</span></div>
+      ${r.early ? `<div class="jrow"><span>مؤشر مبكر (يشمل المفتوحة بسعرها الآن)</span><span class="num">${fmtCI(r.early.all)}</span></div>` : ''}</div>`;
   }
-  const et = evTest();
-  html += `<h3>اختبار قوة الدليل: هجوم مقابل ضعيف</h3><div class="note"><b class="${et.cls}">${esc(et.verdict)}</b>
-    <div class="jrow"><span>هجوم (فوري)</span><span class="num">${fmtRci(Object.assign({ n: et.atk.scans }, et.atk))}</span></div>
-    <div class="jrow"><span>ضعيف (فوري)</span><span class="num">${fmtRci(Object.assign({ n: et.wk.scans }, et.wk))}</span></div>
-    <div class="jrow"><span>الفرق</span><span class="num">${et.diff != null ? fmtR(et.diff) : '—'}</span></div>
-    <p class="help">يُعتمد إذا تفوق "هجوم" بـ +${CFG.EV.adopt}R فأكثر ولم يخسر الفرق في السوق الضعيف، بعد ${CFG.EV.scans} مسحًا جديدًا منها ${CFG.EV.weak} في سوق ضعيف. يسقط إذا قل الفرق عن +${CFG.EV.drop}R.</p></div>`;
 
-  const row = (lb, s, extra) => `<tr><td>${lb}${extra || ''}</td><td class="num">${s.scans}</td><td class="num">${s.trades}</td><td class="num ${s.n ? (s.mean > 0 ? 'win' : 'loss') : ''}">${fmtRci(s)}</td></tr>`;
-  const head = first => `<table><thead><tr><th>${first}</th><th>مسوح</th><th>صفقات</th><th>R لكل إشارة</th></tr></thead><tbody>`;
-  html += `<h3>مقارنة الخطط على نفس الإشارات</h3>${head('الخطة')}
-  ${PLANS.map(k => { const s = planStats(k); return row(PLN[k], s, s.nofill ? `<div class="muted" style="font-size:11.5px">لم يُنفَّذ ${s.nofill}</div>` : ''); }).join('')}
-  </tbody></table>
-  <p class="help">R لكل إشارة بعد رسوم ${CFG.fee}%، والإشارة التي لم يُنفَّذ أمرها = 0. الرقم بعد ± هو فترة ثقة 95%: إذا تداخلت فترتا خطتين فالفرق بينهما قد يكون صدفة. صفقات المسح الواحد تتحرك معًا، فالمسح هو المشاهدة المستقلة.</p>
-  <div class="seg">${PLANS.map(k => `<button class="btn ${vp === k ? 'on' : ''}" data-action="vp" data-plan="${k}">${PLN[k]}</button>`).join('')}</div>
-  <p class="help">الجداول والقوائم أدناه تعرض الخطة المختارة.</p>`;
+  const row = (lb, list) => { const d = groupStats(list, j => doneR(j, 'W', now)), e = groupStats(list, markR);
+    return `<tr><td>${lb}</td><td class="num">${list.length}</td><td class="num ${d.days ? (d.mean > 0 ? 'win' : 'loss') : ''}">${fmtCI(d)}</td><td class="num">${e.days ? fmtR(e.mean) : '—'}</td></tr>`; };
+  const v4 = S.journal.filter(j => j.v === 4), old = S.journal.filter(j => j.v !== 4 && j.pl && j.pl.W);
+  html += `<h3>النتائج حسب المجموعة</h3><table><thead><tr><th>المجموعة</th><th>صفقات</th><th>R مكتمل</th><th>مع المفتوحة</th></tr></thead><tbody>
+    ${Object.keys(GRP).map(g => row(GRP[g], v4.filter(j => j.g === g))).join('')}
+    ${old.length ? row('قبل v4 (مرجع فقط)', old) : ''}</tbody></table>
+    <p class="help">دخول فوري ووقف وهدف ثابتان، بعد رسوم ${CFG.fee}%، متوسط الأيام. الرقم بعد ± فترة ثقة 95%. "مع المفتوحة" يقيّم المفتوحة بسعرها الآن: إنذار مبكر لا نتيجة. السجل القديم بُنيت بعض خططه بعد الحدث ولم يكتمل أفق أغلب صفقاته، فلا يدخل في أي حكم.</p>`;
 
-  const groups = (title, first, rows) => `<h3>${title}</h3>${head(first)}${rows.map(([lb, f]) => row(lb, planStats(vp, f))).join('')}</tbody></table>`;
-  html += groups('هل ملاحظة الخطورة صادقة؟', 'الخطورة', ['low', 'mid', 'high'].map(lv => [RISK_W[lv], j => j.rk && j.rk.lv === lv]));
-  html += groups('هل القوة النسبية تتنبأ؟', 'الترتيب', [[80, 101, 'أقوى 20%'], [50, 80, 'الوسط الأعلى'], [0, 50, 'النصف الأضعف']].map(([a, b, lb]) => [lb, j => j.f && j.f.rs != null && j.f.rs >= a && j.f.rs < b]));
-  html += groups('حسب قوة الدليل', 'الدليل', ['atk', 'norm', 'weak'].map(ev => [EVW[ev], j => j.f && j.f.ev === ev]));
-  html += groups('أفضل 3 في المسح مقابل البقية', 'المجموعة', [['أفضل 3', j => j.f && j.f.evLive && j.f.top === 1], ['البقية', j => j.f && j.f.evLive && j.f.top === 0]]);
-  html += groups('حسب السوق', 'السوق', [['قوي', j => j.f && j.f.mk && !weakMk(j)], ['ضعيف', weakMk]]);
-  html += groups('أداء كل فئة', 'الفئة', [3, 2, 1, 0].map(t => [TIER[t], j => j.tier === t]));
-  const riskOfJ = j => { const p = j.pl && (j.pl[vp] || j.pl.W); return p && p.s ? ((p.e || p.lo || j.entry) - p.s) / (p.e || p.lo || j.entry) * 100 : (j.entry - j.stop) / j.entry * 100; };
-  html += groups('حسب مسافة الوقف', 'الوقف', [['أقل من 8%', j => riskOfJ(j) < 8], ['8–12%', j => riskOfJ(j) >= 8 && riskOfJ(j) < 12], ['12% فأكثر', j => riskOfJ(j) >= 12]]);
-  html += `<p class="help">هذه الجداول للمراقبة لا للتعديل: لا نغيّر قاعدة بناءً على خلية واحدة. كل صفقة تُغلق عند الوقف أو الهدف أو بعد ${CFG.journal.horizonDays} أيام بسعر الإغلاق.</p>`;
-
-  const res = j => { const a = vp === 'A' ? (j.status === 'open' ? null : j) : j.alt && j.alt[vp]; return a; };
-  const openJ = S.journal.filter(j => { const a = res(j); return !a || a.status === 'open' || a.status === 'pending'; }).sort((a, b) => b.t - a.t);
-  const doneJ = S.journal.filter(j => { const a = res(j); return a && a.status !== 'open' && a.status !== 'pending'; }).sort((a, b) => (res(b).closeT || b.t) - (res(a).closeT || a.t)).slice(0, 40);
-  const lbl = { win: 'ربح', loss: 'خسارة', expired: 'انتهت المدة', nofill: 'لم يُنفَّذ' };
+  const shown = S.journal.filter(j => j.g === 'pick' || j.g === 'st' || (j.v !== 4 && j.pl && j.pl.W));
+  const lbl = { win: 'ربح', loss: 'خسارة', expired: 'انتهت المدة' };
+  const tag = j => j.g === 'st' ? 'مراقبة' : j.g === 'pick' ? TIER[j.tier] : 'قديم';
+  const openJ = shown.filter(isOpen).sort((a, b) => b.t - a.t);
+  const doneJ = shown.filter(j => !isOpen(j)).sort((a, b) => (b.alt.W.closeT || b.t) - (a.alt.W.closeT || a.t)).slice(0, 30);
   html += `<h3>مفتوحة (<span class="num">${openJ.length}</span>)</h3>`;
-  html += openJ.length ? openJ.map(j => `<div class="jrow"><span><b class="num">${esc(j.sym.replace('USDT', ''))}</b> ${TIER[j.tier]}</span><span class="muted">${ago(j.t)}</span></div>`).join('') : `<p class="help">تُضاف كل فرصة تظهر في المسح تلقائيًا.</p>`;
+  html += openJ.length ? openJ.map(j => { const m = markR(j);
+    return `<div class="jrow"><span><b class="num">${esc(j.sym.replace('USDT', ''))}</b> ${tag(j)}</span><span>${m != null ? `<span class="num ${m > 0 ? 'win' : 'loss'}">${fmtR(m)}</span> ` : ''}<span class="muted">${ago(j.t)}</span></span></div>`; }).join('') : `<p class="help">تُضاف كل فرصة تظهر في المسح تلقائيًا.</p>`;
   html += `<h3>مغلقة مؤخرًا</h3>`;
-  html += doneJ.length ? doneJ.map(j => { const a = res(j), r = planR(j, vp); const cls = a.status === 'nofill' ? 'exp' : r > 0 ? 'win' : 'loss';
-    return `<div class="jrow"><span><b class="num">${esc(j.sym.replace('USDT', ''))}</b> ${TIER[j.tier]}</span><span class="${cls}">${lbl[a.status] || a.status}${a.status === 'nofill' ? '' : ` <span class="num">${fmtR(r)}</span> <span class="muted num">${(a.days || 0).toFixed(1)}ي</span>`}</span></div>`; }).join('') : `<p class="help">لا توجد نتائج بعد. تُقيَّم الصفقات المفتوحة مع كل مسح.</p>`;
+  html += doneJ.length ? doneJ.map(j => { const a = j.alt.W, r = planR(j, 'W');
+    return `<div class="jrow"><span><b class="num">${esc(j.sym.replace('USDT', ''))}</b> ${tag(j)}</span><span class="${r > 0 ? 'win' : 'loss'}">${lbl[a.status] || a.status} <span class="num">${fmtR(r)}</span> <span class="muted num">${(a.days || 0).toFixed(1)}ي</span></span></div>`; }).join('') : `<p class="help">لا توجد نتائج بعد. تُقيَّم الصفقات المفتوحة مع كل مسح.</p>`;
+  html += `<p class="help">المجموعتان الضابطة و"إشارة واحدة" تُسجَّلان للمقارنة فقط ولا تظهران هنا.</p>`;
+
   html += `<h3>نسخة احتياطية</h3>
+    <p class="help">آخر نسخة: ${S.exportedAt ? ago(S.exportedAt) : 'لم تُنسخ بعد'}.</p>
     <button class="btn" data-action="export">نسخ السجل</button>
-    <button class="btn" data-action="exportCandles" ${S.bf || S.running ? 'disabled' : ''}>جلب الشموع للتحليل</button>
+    <button class="btn" data-action="exportCandles" ${S.bf || S.running ? 'disabled' : ''}>${S.bf ? 'جلب الشموع ' + S.bf.done + '/' + S.bf.n : 'جلب الشموع للتحليل'}</button>
     ${S.exportText ? `<button class="btn" data-action="copyText">نسخ النص</button>` : ''}
     <button class="btn" data-action="showImport">استيراد</button>
-    ${S.exportText ? `<textarea readonly>${esc(S.exportText)}</textarea><p class="help">إذا لم يُنسخ تلقائيًا، حدّد النص وانسخه يدويًا. الصقه في محادثة Claude لتحليل الأداء ومعايرة العتبات.</p>` : ''}
+    ${S.bfMsg ? `<p class="help">${esc(S.bfMsg)}</p>` : ''}
+    ${S.exportText ? `<textarea readonly>${esc(S.exportText)}</textarea><p class="help">إذا لم يُنسخ تلقائيًا، حدّد النص وانسخه يدويًا، واحفظه في ملاحظاتك أو الصقه في محادثة Claude.</p>` : ''}
     ${S.showImport ? `<textarea id="importBox" placeholder="الصق نسخة السجل هنا"></textarea><button class="btn" data-action="doImport">دمج في السجل</button>` : ''}
     ${S.msg ? `<p class="help">${esc(S.msg)}</p>` : ''}
     <div><button class="btn danger" data-action="resetJournal">مسح السجل بالكامل</button></div>`;
@@ -1090,7 +889,7 @@ const WORKER = `export default {
 };`;
 
 function settingsHTML() {
-  const s = S.settings, V = CFG.V2;
+  const s = S.settings, D = CFG.D;
   return `<label for="rkBox">مخاطرة الصفقة بالدولار</label>
     <input id="rkBox" type="text" inputmode="decimal" value="${esc(s.riskUsd)}">
     <p class="help">للاسترشاد فقط: يعرض على كل بطاقة الحجم الذي يخسر هذا المبلغ عند الوقف. القرار لك.</p>
@@ -1109,15 +908,13 @@ function settingsHTML() {
       <p>من Safari: dash.cloudflare.com ← Workers &amp; Pages ← Create ← Hello World ← Edit code. الصق الكود التالي ثم Deploy، وانسخ الرابط الناتج إلى حقل الوسيط.</p>
       <pre>${esc(WORKER)}</pre>
       <p>الوسيط يقبل مسارات بيانات السوق العامة فقط، ولا يحمل أي مفاتيح.</p></details>
-    <details class="legend"><summary>العتبات الحالية</summary>
-      <p>A: شراء taker ≥ ${CFG.A.ratio * 100}% خلال ${CFG.A.hours} ساعة، وحركة بين ${CFG.A.minMove}% و${CFG.A.maxMove}%.</p>
-      <p>B: الحجم ≥ ×${CFG.B.vol}، عدد الصفقات يتبعه بنسبة ${CFG.B.follow * 100}%، حجم الصفقة ≤ ×${CFG.B.size}. اشتباه ضخ فوق ×${CFG.B.suspect}.</p>
-      <p>D: وقف = الأوسع بين آخر قاع و${V.stopAtr}×ATR وبحد أقصى ${V.maxStop}%، هدف = أقرب مقاومة بحد أقصى ${V.reachAtr}×ATR، هدف ≥ ${V.minTarget}%، عائد/مخاطرة ≥ ${V.minRR}.</p>
-      <p>الدخول: أمر limit عند ${V.pullAtr}×ATR تحت السعر لمدة ${V.pullTTLh} ساعة. قيد الاختبار في السجل (H): limit عند −${V.pullAtr}×ATR أو اختراق عند +${V.brkAtr}×ATR، أيهما أولًا، ثم وقف يلحق أعلى سعر بمسافة ${V.trailAtr}×ATR بعد تحرك +${V.actAtr}×ATR، بلا هدف. S: دخول فوري، نصف عند الهدف والباقي وقفه على الدخول ثم يلحق أعلى سعر بمسافة ${V.trailAtr}×ATR. كل الخطط تُقاس بعد رسوم ${CFG.fee}%.</p>
-      <p>الخطورة: BTC تحت متوسط 50 يومًا أو 24 ساعة ≤ ${CFG.RISK.btcDay}% أو اتساع أقل من ${CFG.RISK.breadth}% (+2)، BTC أربع ساعات ≤ ${CFG.RISK.btc4h}% (+1)، وقف أوسع من ${CFG.RISK.wideStop}% (+1).</p>
-      <p>الفلاتر: حجم ≥ $5M (أو $1.5M مع دخول حجم صحي ×${CFG.B.surge})، صعود يومي ≤ ${CFG.chaseMax}%، فارق سعري ≤ ${CFG.spreadMax}%، عمر ≥ ${CFG.minDays} يومًا.</p>
-      <p>قيد المراقبة: أعلى ${CFG.near.max} تقييمًا بلا حد أدنى. مدة الصفقة في السجل ${CFG.journal.horizonDays} أيام.</p>
-      <p>هذه قيم ابتدائية. تُعدَّل بعد تحليل السجل فقط.</p></details>`;
+    <details class="legend"><summary>العتبات الحالية (v4)</summary>
+      <p>B: الحجم ≥ ×${CFG.B.vol}، عدد الصفقات يتبعه بنسبة ${CFG.B.follow * 100}%، حجم الصفقة ≤ ×${CFG.B.size}.</p>
+      <p>C: عائد 3 و7 أيام أعلى من BTC.</p>
+      <p>D: Supertrend(${D.stLen},${D.stMult}) 4H أخضر. وقف = الأوسع بين آخر قاع و${D.stopAtr}×ATR وبحد أقصى ${D.maxStop}%، هدف = أقرب مقاومة بحد أقصى ${D.reachAtr}×ATR، هدف ≥ ${D.minTarget}%، عائد/مخاطرة ≥ ${D.minRR}.</p>
+      <p>السجل: المرشحون، وB+C بلا اتجاه، وإشارة واحدة مع D، و${CFG.ctrl.n} عملات عشوائية كل ${CFG.ctrl.everyH} ساعات بنفس هندسة الدخول. خطتان على كل صفقة: W (هدف ثابت) وS (نصف عند الهدف والباقي يلحق أعلى سعر بمسافة ${D.trailAtr}×ATR). الأفق ${CFG.journal.horizonDays} أيام والرسوم ${CFG.fee}%.</p>
+      <p>الفلاتر: حجم ≥ $5M (أو $1.5M مع حجم ×${CFG.B.surge})، صعود يومي ≤ ${CFG.chaseMax}%، فارق سعري ≤ ${CFG.spreadMax}%، عمر ≥ ${CFG.minDays} يومًا.</p>
+      <p>لا تُعدَّل العتبات قبل أن يصدر حكم من السجل.</p></details>`;
 }
 
 function renderScanArea() { const n = document.getElementById('scanArea'); if (n) n.innerHTML = scanAreaHTML(); }
@@ -1147,12 +944,9 @@ function onClick(e) {
   const act = a.dataset.action;
   if (act === 'scan') scan();
   else if (act === 'toggle') { if (e.target.closest('a')) return; S.open[a.dataset.sym] = !S.open[a.dataset.sym]; render(); }
-  else if (act === 'vp') { S.vp = a.dataset.plan; render(); }
-  else if (act === 'backfill') backfill();
   else if (act === 'exportCandles') exportCandles();
   else if (act === 'copyText') {
-    const done = ok => { S.msg = ok ? 'نُسخ النص. الصقه الآن في المحادثة.' : 'تعذر النسخ التلقائي. اضغط داخل المربع، حدّد الكل، ثم انسخ.'; render(); };
-    const ta = document.querySelector('textarea[readonly]');
+    const done = ok => { S.msg = ok ? 'نُسخ النص.' : 'تعذر النسخ التلقائي. اضغط داخل المربع، حدّد الكل، ثم انسخ.'; render(); };
     if (navigator.clipboard && S.exportText) navigator.clipboard.writeText(S.exportText).then(() => done(true)).catch(() => done(false));
     else done(false);
   }
@@ -1167,9 +961,10 @@ function onClick(e) {
   }
   else if (act === 'testConn') testConn();
   else if (act === 'export') {
-    S.exportText = JSON.stringify({ app: 'radar-v2', exported: new Date().toISOString(), cfg: CFG, journal: S.journal });
+    S.exportText = JSON.stringify({ app: 'radar-v4', exported: new Date().toISOString(), cfg: CFG, journal: S.journal });
+    S.exportedAt = Date.now(); store.set('exportedAt', S.exportedAt);
     S.msg = null;
-    if (navigator.clipboard) navigator.clipboard.writeText(S.exportText).then(() => { S.msg = 'نُسخ السجل. الصقه في ملاحظاتك أو في محادثة Claude.'; render(); }).catch(() => render());
+    if (navigator.clipboard) navigator.clipboard.writeText(S.exportText).then(() => { S.msg = 'نُسخ السجل. احفظه في ملاحظاتك أو الصقه في محادثة Claude.'; render(); }).catch(() => render());
     render();
   }
   else if (act === 'showImport') { S.showImport = true; render(); }
@@ -1180,7 +975,8 @@ function onClick(e) {
       if (!Array.isArray(list)) throw new Error();
       const ids = new Set(S.journal.map(j => j.id)); let added = 0;
       for (const j of list) if (j && j.id && j.sym && !ids.has(j.id)) { S.journal.push(j); added++; }
-      store.set('journal', S.journal); S.showImport = false; S.msg = 'أُضيفت ' + added + ' صفقة إلى السجل. اضغط "تحليل رجعي للسجل" لتحليل الجديد منها.';
+      S.journal.sort((x, y) => x.t - y.t);
+      store.set('journal', S.journal); S.showImport = false; S.msg = 'أُضيفت ' + added + ' صفقة إلى السجل.';
     } catch (err) { S.msg = 'النص غير صالح. الصق النسخة كما هي دون تعديل.'; }
     render();
   }
@@ -1195,7 +991,8 @@ if (typeof document !== 'undefined' && document.getElementById) {
   render();
   setInterval(() => { if (!S.running && (Date.now() < S.cooldownUntil + 1500 || Date.now() < S.haltUntil + 1500)) renderScanArea(); }, 1000);
 }
-if (typeof module !== 'undefined') module.exports = { simSplit, evTest, evFrom, analyze, grade, regimeOf, supertrend, atrSeries, ema, resistances, parseK, closedK, buildPlans, simStd, simH, simPull, runSim, planStats, planR, clustered, hTest, riskOf, rsRanks, entryPlan, CFG, S };
+if (typeof module !== 'undefined') module.exports = { analyze, grade, groupOf, regimeOf, riskOf, supertrend, atrSeries, ema, resistances, parseK, closedK, simStd, simSplit, runSim, planR, doneR, markR, compare, runTest, TESTS, groupStats, episodes, drawCtrl, addToJournal, dayOf, CFG, MODE, S, isOpen, needsEval };
+
 </script>
 </body>
 </html>
